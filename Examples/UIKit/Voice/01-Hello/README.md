@@ -101,7 +101,7 @@ One button does both, keyed off `state.isActive`:
 
 `render()` disables the button while `.connecting` so a double-tap can't race the handshake.
 
-**Under the hood:** `start()` runs the offer / answer / trickle-ICE handshake against the gateway (fetching TURN/ICE servers first, with a built-in fallback) and activates a `playAndRecord` `AVAudioSession`. Mid-call drops and audio interruptions surface as `PolyError.Voice.disconnected` / `.interrupted` — both `isRetryable`, and the SDK reconnects transient drops itself before giving up.
+**Under the hood:** `start()` provisions the call on `webrtc-bridge`, sends a fully-gathered SDP offer over HTTPS, applies the answer, then renegotiates once media is up to pull the agent's audio — and activates a `playAndRecord` `AVAudioSession`. Mid-call drops and audio interruptions surface as `PolyError.Voice.disconnected` / `.interrupted` — both `isRetryable`, and the SDK reconnects transient drops itself before giving up.
 
 *See [voice guide › Resilience](../../../../docs/PolyVoice.md#resilience).*
 
@@ -154,7 +154,7 @@ iOS keeps one active output and routes accessories (headset, Bluetooth, CarPlay)
 
 - CallKit / system call UI — that is the next rung: [`02-CallKit`](../02-CallKit/), see also [voice guide › CallKit](../../../../docs/PolyVoice.md#callkit)
 - reconnect and interruption UI — the SDK recovers transient drops itself, see [voice guide › Resilience](../../../../docs/PolyVoice.md#resilience)
-- a custom / dev gateway — `VoiceOptions.signalingHost`, see [voice guide › Credentials](../../../../docs/PolyVoice.md#credentials)
+- a custom / dev bridge — `VoiceOptions.signalingHost`, see [voice guide › Credentials](../../../../docs/PolyVoice.md#credentials)
 - chat + voice in one app — the products compose; start from the chat ladder's [`01-Hello`](../../Chat/01-Hello/)
 
 Further voice rungs will land alongside this one as `02-…`.

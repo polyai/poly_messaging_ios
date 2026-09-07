@@ -129,14 +129,14 @@ you use for chat):
 | Value | What it is | Sent as |
 |---|---|---|
 | **Connector token** — `Configuration.apiKey` | your connector token | `X-Token` (authenticates the call) |
-| **Web calling token** — `VoiceOptions.webrtcToken` | the media auth token — a **distinct** token from the connector token | the offer `authToken` (gateway) or `Authorization: Bearer` (bridge) |
+| **Web calling token** — `VoiceOptions.webrtcToken` | the media auth token — a **distinct** token from the connector token | `Authorization: Bearer` when the call is provisioned |
 
-> **Region:** calls default to the US gateway. For a UK / EUW / other-region (or dev) agent, set the
+> **Region:** calls default to the US cluster. For a UK / EUW / other-region (or dev) agent, set the
 > environment on the shared `Configuration` — e.g. `Configuration(apiKey: …, environment: .cluster("…"))`,
 > the same `Configuration` you use for chat. See the [messaging guide](../README.md#configuration).
 >
-> **Custom / self-hosted host:** pass `VoiceOptions(webrtcToken:, signalingHost:)` to point at a specific
-> gateway — or bridge — host (required when the environment is `.custom`).
+> **Custom / self-hosted host:** pass `VoiceOptions(webrtcToken:, signalingHost:)` to point at a
+> specific `webrtc-bridge` deployment (required when the environment is `.custom`).
 
 ## How a call connects
 
@@ -205,10 +205,10 @@ Both example apps ship a **speaker toggle**.
 - **Call connects but is silent (no CallKit)** — check the mic permission was granted
   (Settings › *your app* › Microphone) and that nothing else in the app deactivated the
   `AVAudioSession` mid-call.
-- **`failed(.voice(.timedOut))` after ~30 s** — signaling reached the gateway but media
+- **`failed(.voice(.timedOut))` after ~30 s** — signalling reached the bridge but media
   never connected: usually a firewalled/relay-only network where the TURN fetch failed
   (the SDK then falls back to STUN, which can't cross symmetric NAT). Check connectivity
-  or the gateway's ICE endpoint.
+  or the bridge's provision route.
 - **Works on Wi-Fi, dies on the walk to the car** — transient drops reconnect
   automatically (see [Resilience](#resilience)); a `.disconnected` failure is retryable
   (`error.isRetryable`) — offer a redial button.
@@ -217,7 +217,7 @@ Both example apps ship a **speaker toggle**.
 
 ## Resilience
 
-- **Connectivity:** STUN/TURN servers are fetched from the gateway per call, so calls connect
+- **Connectivity:** STUN/TURN servers come from the bridge's provision response per call, so calls connect
   behind symmetric NAT / CGNAT (falls back to public STUN if the fetch fails).
 - **Reconnect:** a dropped signaling socket reconnects automatically (backoff 1s / 2s / 4s) on
   the same session and re-flushes buffered ICE before the call is failed.
@@ -236,17 +236,21 @@ and an `AVAudioSession` controller, injected into a `PolyMessaging` call pipelin
 There are two pipelines behind that seam, one per `VoiceTransport`, because the two backends
 negotiate differently rather than merely talking over different sockets:
 
-| | `CallCoordinator` (`.gateway`) | `BridgeCallCoordinator` (`.bridge`) |
-|---|---|---|
-| Steps | auth → session → link → signal → offer/answer/ICE | auth → session → **provision** → link → offer → connect → pull agent track → events socket |
-| Signalling | `GatewaySignalingChannel` + `SignalingProtocol` | `BridgeApi` (HTTPS) + the same channel for control events |
-| Framing | `SignalingProtocol` | `BridgeProtocol` |
+`BridgeCallCoordinator` runs the whole call:
 
-Both conform to `CallDriver`, so `PolyCall` holds either and knows about neither. The whole of each
-pipeline is exercised over fakes in `PolyMessagingTests` (no sockets, no WebRTC), and the media
-engine's bridge capabilities — the non-trickle gather wait, the renegotiation answer, the mid, and
-remote-track muting — are exercised against the real WebRTC engine in `PolyVoiceTests` on an iOS
-simulator.
+| Step | What it does |
+|---|---|
+| 1-2 | access token, then a messaging session (`RestApi`) |
+| 3 | `POST /api/v1/call` provisions the call and returns its id (`BridgeApi`) |
+| 4 | links the messaging session to **that** id (`VoiceSessionLinker`) |
+| 5 | the gathered offer over HTTPS, answer applied — `start()` returns here |
+| 6-7 | media connects, then the agent track is pulled and renegotiated |
+| 8 | the control socket carries barge-in and re-pull (`WebSocketEventsChannel`) |
+
+Framing lives in `BridgeProtocol`. The whole pipeline is exercised over fakes in
+`PolyMessagingTests` (no sockets, no WebRTC), and the media engine's non-trickle gather wait,
+renegotiation answer, mid and remote-track muting are exercised against the real WebRTC engine in
+`PolyVoiceTests` on an iOS simulator.
 
 ---
 

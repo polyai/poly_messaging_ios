@@ -6,9 +6,12 @@ import Foundation
 /// call by sending `EVENT_TYPE_LINK_TO_WEBRTC_CONVERSATION` once the session
 /// starts. Manages the messaging WebSocket used alongside voice calls.
 ///
+/// The `call_sid` it carries is the id the **bridge** minted, so this can only
+/// run after the call is provisioned.
+///
 /// Reuses the existing `Connection` transport: the voice call rides on a normal
 /// messaging session (so the agent's transcript/events flow over the same
-/// pipe), with the `call_sid` correlating it to the audio leg on the gateway.
+/// pipe), with the bridge's call id correlating it to the audio leg.
 actor VoiceSessionLinker {
 
     private let connection: Connection

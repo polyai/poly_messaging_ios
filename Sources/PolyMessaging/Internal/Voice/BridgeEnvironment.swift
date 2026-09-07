@@ -4,9 +4,9 @@ import Foundation
 
 /// Resolves the `webrtc-bridge` base URL for an ``Environment``.
 ///
-/// Kept separate from ``VoiceEnvironment`` rather than folded into it: the
-/// gateway path is shipped and carries production traffic, and the two services
-/// don't share a host pattern in every cluster (see `plg-us-1-prod` below).
+/// The host pattern is not uniform across clusters — see `plg-us-1-prod` below —
+/// so it is a per-environment mapping rather than something derived from the
+/// messaging host.
 struct BridgeEnvironment: Sendable {
 
     /// `https://webrtc-bridge.<cluster>/` — every credentials path returned by

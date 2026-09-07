@@ -200,7 +200,7 @@ final class StubMediaEngine: CallMediaEngine, @unchecked Sendable {
         h?(state)
     }
 
-    /// A syntactically valid audio (Opus) offer. Enough for the gateway to
+    /// A syntactically valid audio (Opus) offer. Enough for the SFU to
     /// produce an `answer` at the signaling layer (no real DTLS follows).
     static let minimalOffer: String = [
         "v=0",

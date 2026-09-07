@@ -5,7 +5,7 @@ import XCTest
 
 /// Unit tests for `VoiceSessionLinker` — the messaging-WS leg of a voice call —
 /// against a `MockConnection`. Previously this component was only exercised by
-/// the opt-in live gateway probe; these tests pin its contract deterministically:
+/// the opt-in live bridge probe; these tests pin its contract deterministically:
 /// URL shape, SESSION_START gating, the link frame, timeout, and the
 /// tolerate-send-failure policy the pipeline relies on.
 final class VoiceSessionLinkerTests: XCTestCase {

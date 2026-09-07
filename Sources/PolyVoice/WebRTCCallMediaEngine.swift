@@ -73,8 +73,9 @@ final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendabl
         let config = RTCConfiguration()
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
-        // Gateway-provided STUN/TURN (falls back to public STUN when the fetch failed);
-        // TURN entries carry credentials, STUN entries don't.
+        // Bridge-provided STUN/TURN from the provision response (falls back to
+        // Cloudflare STUN when it carries none); TURN entries carry credentials,
+        // STUN entries don't.
         config.iceServers = (iceServers.isEmpty ? IceServer.defaultServers : iceServers).map { server in
             if let username = server.username, let credential = server.credential {
                 return RTCIceServer(urlStrings: server.urls, username: username, credential: credential)
