@@ -2,17 +2,18 @@
 
 import Foundation
 
-/// Orchestrates a voice call over `webrtc-bridge` (RUN-1279).
+/// Orchestrates a voice call over `webrtc-bridge` (RUN-1279 / MES-1658) — the one
+/// and only call pipeline since the `webrtc-gateway` path was removed.
 ///
-/// The gateway twin of this type is ``CallCoordinator``. The difference is not
-/// the transport alone — the whole shape of the handshake changes:
+/// For anyone reading this alongside the old gateway code, what changed is not
+/// the transport alone but the shape of the handshake:
 ///
-/// | | gateway | bridge |
+/// | | old gateway | bridge |
 /// |---|---|---|
 /// | credential | `authToken` inside the offer | `Authorization: Bearer` on provision |
 /// | signalling | one WebSocket, trickle ICE | HTTPS for SDP + a control socket |
-/// | call id | client mints it, links, then calls | bridge mints it, so provision comes first |
-/// | agent audio | arrives on the single answer | a second negotiation (pull → answer → renegotiate) |
+/// | call id | client minted it, linked, then called | bridge mints it, so provision comes first |
+/// | agent audio | arrived on the single answer | a second negotiation (pull → answer → renegotiate) |
 ///
 /// Pipeline:
 ///   1. access token                    (`RestApiPort.obtainAccessToken`)
@@ -21,16 +22,16 @@ import Foundation
 ///      because the bridge mints the identifier the link has to carry
 ///   4. link the messaging session      (`VoiceSessionLinker`, with the bridge's `callId`)
 ///   5. offer, gathered, over HTTPS     (`CallMediaEngine` → `POST {connectUrl}`)
-///   6. media connects
+///   6. media connects — `start()` has already returned by here
 ///   7. pull the agent track            (`POST {pullUrl}` → answer → `POST {renegotiateUrl}`)
 ///   8. events socket for barge-in and re-pull control
-actor BridgeCallCoordinator: CallDriver {
+actor BridgeCallCoordinator {
 
     private let api: RestApiPort
     private let bridge: BridgeApiPort
     private let linker: VoiceSessionLinker
     private let media: CallMediaEngine
-    private let makeEventsChannel: @Sendable (URL) -> SignalingChannel
+    private let makeEventsChannel: @Sendable (URL) -> EventsChannel
     private let streamingEnabled: Bool
     private let logger: PolyLogger
 
@@ -40,7 +41,7 @@ actor BridgeCallCoordinator: CallDriver {
 
     private var active = false
     private var provision: BridgeProtocol.Provision?
-    private var events: SignalingChannel?
+    private var events: EventsChannel?
     private var lastMediaState: CallMediaState = .new
     private var hasConnected = false
     private var userMuted = false
@@ -49,6 +50,8 @@ actor BridgeCallCoordinator: CallDriver {
     private var eventLoopTask: Task<Void, Never>?
     private var connectTimeoutTask: Task<Void, Never>?
     private var teardownTask: Task<Void, Never>?
+    /// Runs the post-connect half of the handshake so `start()` doesn't have to.
+    private var negotiationTask: Task<Void, Never>?
     private var mediaStateTask: Task<Void, Never>?
     private var mediaStateSink: AsyncStream<CallMediaState>.Continuation?
     /// Serialises agent-track pulls. Two renegotiations must never interleave on
@@ -66,7 +69,7 @@ actor BridgeCallCoordinator: CallDriver {
         bridge: BridgeApiPort,
         linker: VoiceSessionLinker,
         media: CallMediaEngine,
-        makeEventsChannel: @escaping @Sendable (URL) -> SignalingChannel,
+        makeEventsChannel: @escaping @Sendable (URL) -> EventsChannel,
         streamingEnabled: Bool,
         logger: PolyLogger,
         connectionTimeoutNanos: UInt64 = 30_000_000_000,
@@ -122,10 +125,7 @@ actor BridgeCallCoordinator: CallDriver {
             try ensureActive()
 
             try await negotiate(call)
-            try ensureActive()
-
-            await openEventsSocket(call)
-            logger.debug("Bridge call negotiated", metadata: ["callId": call.callId])
+            logger.debug("Bridge offer answered — waiting for media", metadata: ["callId": call.callId])
         } catch {
             let mapped = mapError(error)
             fail(mapped)
@@ -155,10 +155,15 @@ actor BridgeCallCoordinator: CallDriver {
 
     // MARK: - Negotiation
 
-    /// Steps 5-7: offer over HTTPS, wait for media, then pull the agent track.
+    /// Steps 5-6: the gathered offer over HTTPS, and the answer applied.
+    ///
+    /// `start()` returns once this completes — with the call `.connecting`, exactly
+    /// as it did on the gateway, so the caller watches `states` for `.connected`.
+    /// Everything after needs a connected peer (the SFU rejects the agent-track
+    /// pull before that), so ``finishNegotiation(_:)`` runs it on for the caller.
     private func negotiate(_ call: BridgeProtocol.Provision) async throws {
         let iceServers = call.credentials.iceServers.isEmpty
-            ? IceServer.bridgeDefaultServers
+            ? IceServer.defaultServers
             : call.credentials.iceServers
         _ = try await media.createOffer(iceServers: iceServers)
         try ensureActive()
@@ -178,10 +183,25 @@ actor BridgeCallCoordinator: CallDriver {
         try ensureActive()
         try await media.acceptAnswer(sdp: answer)
 
-        // Cloudflare rejects the agent-track pull until the peer connection is
-        // up, so this wait is part of the handshake, not just an observation.
-        try await waitForMediaConnected()
-        try await pullAgentTrack(call)
+        negotiationTask = Task { [weak self] in
+            await self?.finishNegotiation(call)
+        }
+    }
+
+    /// Steps 7-8, after media connects: pull the agent track (which starts its
+    /// audio) and open the control socket. A failure here fails the call — the
+    /// caller is watching `states`, not still awaiting `start()`.
+    private func finishNegotiation(_ call: BridgeProtocol.Provision) async {
+        do {
+            try await waitForMediaConnected()
+            try await pullAgentTrack(call)
+            try ensureActive()
+            await openEventsSocket(call)
+            logger.debug("Bridge call negotiated", metadata: ["callId": call.callId])
+        } catch {
+            guard active else { return }
+            fail(mapError(error))
+        }
     }
 
     /// Subscribe to the agent track: the pull returns an offer we answer and
@@ -235,7 +255,7 @@ actor BridgeCallCoordinator: CallDriver {
         await channel.open()
     }
 
-    private func startEventsLoop(_ channel: SignalingChannel) {
+    private func startEventsLoop(_ channel: EventsChannel) {
         eventLoopTask?.cancel()
         eventLoopTask = Task { [weak self] in
             for await event in channel.events {
@@ -244,7 +264,7 @@ actor BridgeCallCoordinator: CallDriver {
         }
     }
 
-    private func handleChannelEvent(_ event: SignalingChannelEvent) async {
+    private func handleChannelEvent(_ event: EventsChannelEvent) async {
         switch event {
         case .opened:
             // A WebSocket upgrade can't carry X-Call-Token, so the same token
@@ -394,6 +414,7 @@ actor BridgeCallCoordinator: CallDriver {
         active = false
         connectTimeoutTask?.cancel()
         eventLoopTask?.cancel()
+        negotiationTask?.cancel()
         pullTask?.cancel()
         mediaStateSink?.finish()
         mediaStateTask?.cancel()

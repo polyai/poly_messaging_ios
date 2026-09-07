@@ -7,8 +7,9 @@ import WebRTC
 
 /// Real WebRTC audio engine.
 ///
-/// Audio-only (Opus), Unified Plan, trickle ICE. Bridges WebRTC's completion-handler
-/// API into the `async` `CallMediaEngine` seam the `CallCoordinator` drives.
+/// Audio-only (Opus), Unified Plan, **non-trickle** ICE — the bridge takes a
+/// fully-gathered offer over HTTPS. Bridges WebRTC's completion-handler API into
+/// the `async` `CallMediaEngine` seam the `BridgeCallCoordinator` drives.
 final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendable {
 
     // One factory per process; RTCInitializeSSL is required once before use.
@@ -29,7 +30,6 @@ final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendabl
     // otherwise find `peer == nil`, release nothing, and leave the connection it never
     // saw running with a live mic track. Every publish point re-checks this latch.
     private var closed = false
-    private var localCandidateHandler: (@Sendable (IceCandidate) -> Void)?
     private var stateHandler: (@Sendable (CallMediaState) -> Void)?
     // Non-trickle gather bookkeeping for the bridge path. Candidates are counted
     // per ICE generation (keyed by the local description's ice-ufrag) so a
@@ -131,24 +131,6 @@ final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendabl
                 if let error { cont.resume(throwing: error) } else { cont.resume() }
             }
         }
-    }
-
-    func addRemoteCandidate(_ candidate: IceCandidate) async throws {
-        guard let peer = currentPeer() else { return }
-        let rtc = RTCIceCandidate(
-            sdp: candidate.candidate,
-            sdpMLineIndex: Int32(candidate.sdpMLineIndex ?? 0),
-            sdpMid: candidate.sdpMid
-        )
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            peer.add(rtc) { error in
-                if let error { cont.resume(throwing: error) } else { cont.resume() }
-            }
-        }
-    }
-
-    func setLocalCandidateHandler(_ handler: @escaping @Sendable (IceCandidate) -> Void) async {
-        lock.lock(); localCandidateHandler = handler; lock.unlock()
     }
 
     func setStateHandler(_ handler: @escaping @Sendable (CallMediaState) -> Void) async {
@@ -300,9 +282,10 @@ final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendabl
 
 extension WebRTCCallMediaEngine: RTCPeerConnectionDelegate {
 
+    /// Candidates are never trickled — the bridge's SDP proxy has no channel for
+    /// them. They are only counted here, so `awaitIceGathering` can tell when the
+    /// stream has gone quiet and the local description is complete enough to send.
     func peerConnection(_ pc: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
-        // Bookkeeping for the bridge's non-trickle gather wait. The gateway path
-        // ignores it; it costs one dictionary write per candidate.
         let key = candidate.sdp.ufragValue ?? currentIceUfrag() ?? ""
         lock.lock()
         if candidate.sdp.isEmpty {
@@ -311,13 +294,7 @@ extension WebRTCCallMediaEngine: RTCPeerConnectionDelegate {
             candidateCounts[key, default: 0] += 1
             lastCandidateAt[key] = Date()
         }
-        let handler = localCandidateHandler
         lock.unlock()
-        handler?(IceCandidate(
-            candidate: candidate.sdp,
-            sdpMid: candidate.sdpMid,
-            sdpMLineIndex: Int(candidate.sdpMLineIndex)
-        ))
     }
 
     func peerConnection(_ pc: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {

@@ -20,12 +20,6 @@ final class PolyVoiceTests: XCTestCase {
         XCTAssertTrue(options.speakerphone, "hands-free is the default for a voice agent")
         XCTAssertNil(options.signalingHost)
         XCTAssertFalse(options.callKit, "CallKit integration is strictly opt-in")
-        XCTAssertEqual(options.transport, .gateway, "the shipped path stays the default")
-    }
-
-    func test_voiceOptions_bridgeTransportIsOptIn() {
-        let options = VoiceOptions(webrtcToken: "t", transport: .bridge)
-        XCTAssertEqual(options.transport, .bridge)
     }
 
     #if os(iOS)
@@ -67,28 +61,6 @@ final class PolyVoiceTests: XCTestCase {
         )
         XCTAssertEqual(call.state, .idle)
         XCTAssertFalse(call.state.isActive)
-    }
-
-    func test_call_bridgeTransport_buildsIdleCall_withRealEngine() throws {
-        // Same real engine, wired to the bridge pipeline instead of the gateway one.
-        let call = try PolyVoice.call(
-            config: Configuration(apiKey: "k"),
-            options: VoiceOptions(webrtcToken: "t", transport: .bridge)
-        )
-        XCTAssertEqual(call.state, .idle)
-    }
-
-    func test_call_bridgeTransport_customEnvironmentWithoutHost_throws() {
-        let custom = Configuration(
-            apiKey: "k",
-            environment: .custom(
-                restBaseURL: URL(string: "https://gw.example/api/v1")!,
-                wsBaseURL: URL(string: "wss://gw.example/ws")!
-            )
-        )
-        XCTAssertThrowsError(
-            try PolyVoice.call(config: custom, options: VoiceOptions(webrtcToken: "t", transport: .bridge))
-        )
     }
 
     func test_call_callKitMode_buildsIdleCall() throws {
@@ -194,7 +166,7 @@ final class WebRTCBridgeCapabilityTests: XCTestCase {
         )
         defer { Task { await engine.close() } }
 
-        _ = try await engine.createOffer(iceServers: IceServer.bridgeDefaultServers)
+        _ = try await engine.createOffer(iceServers: IceServer.defaultServers)
         await engine.awaitIceGathering(quiet: 0.2, cap: 2.0)
 
         let gathered = await engine.localDescriptionSDP()

@@ -51,7 +51,7 @@ enum BridgeProtocol {
         let trackName: String?
         /// ICE servers the bridge wants this call to use. The dev deployment does
         /// not send these yet (RUN-1780), so callers fall back to
-        /// ``IceServer/bridgeDefaultServers``.
+        /// ``IceServer/defaultServers``.
         let iceServers: [IceServer]
         let eventsPath: String?
         let pullPath: String?
@@ -75,7 +75,7 @@ enum BridgeProtocol {
                 connectPath: connect,
                 token: creds.string("token"),
                 trackName: creds.string("trackName"),
-                iceServers: GatewayIceServersFetcher.parseServers(creds.array("iceServers") ?? []),
+                iceServers: IceServer.parse(creds.array("iceServers") ?? []),
                 eventsPath: extra.string("eventsUrl"),
                 pullPath: extra.string("pullUrl"),
                 renegotiatePath: extra.string("renegotiateUrl")

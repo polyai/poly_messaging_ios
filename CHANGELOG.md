@@ -6,25 +6,35 @@ is pre-1.0, breaking changes bump the **minor** version.
 
 ## [Unreleased]
 
-### Added
-- **`VoiceTransport`** — choose the WebRTC backend a call uses:
-  `VoiceOptions(webrtcToken:, transport: .bridge)` places the call over `webrtc-bridge`
-  instead of `webrtc-gateway` (MES-1658). `.gateway` remains the default, so existing
-  apps are unaffected.
-- Bridge call pipeline (`BridgeCallCoordinator`): provision over
-  `POST /api/v1/call`, SDP over HTTPS, a control socket for barge-in and agent-track
-  re-pulls, and `DELETE /api/v1/call/{id}` teardown. The messaging session links to the
-  **bridge-minted** call id, so provision now runs before the link on this path.
-- Five `CallMediaEngine` capabilities behind the bridge path, all with default
-  implementations so existing conformers keep compiling: `awaitIceGathering(quiet:cap:)`
-  (non-trickle gathering), `localDescriptionSDP()`, `audioMid()`, `acceptRemoteOffer(sdp:)`
-  (the agent-track renegotiation) and `setRemoteAudioEnabled(_:)` (barge-in).
-- `IceServer.bridgeDefaultServers` — Cloudflare STUN, the fallback on the bridge path
-  when the provision response carries no `iceServers` (RUN-1780).
-
 ### Changed
-- `PolyCall` now holds any `CallDriver` rather than a concrete `CallCoordinator`, so the
-  same public surface covers both backends. No public API change.
+- **Voice calls now run over `webrtc-bridge`** instead of `webrtc-gateway` (MES-1658). The gateway
+  path is gone, not deprecated — it no longer works.
+
+  **No code change is required.** `PolyVoice.call(config:options:)`, `VoiceOptions`, `PolyCall`,
+  `CallState`, mute, audio routing, CallKit and every error case are unchanged, and a call still
+  links to the same messaging session. `start()` still returns with the call `.connecting`; watch
+  `states` for `.connected` as before.
+
+  What moved underneath: the call is provisioned with `POST /api/v1/call` (the web calling token
+  becomes a Bearer credential), SDP travels over HTTPS non-trickle, the **bridge** mints the call id
+  (so provision now runs before the messaging link), a second negotiation starts the agent's audio,
+  a control socket carries barge-in and re-pull, and `DELETE /api/v1/call/{id}` replaces the close
+  frame.
+- `VoiceOptions.signalingHost` now overrides the **bridge** host rather than the gateway host. Same
+  parameter, same meaning ("point voice at this deployment"), new target.
+- `IceServer.defaultServers` is now Cloudflare STUN (`stun.cloudflare.com`). Media terminates at
+  Cloudflare's edge on this path, so the old `stun.l.google.com` default went out with the gateway.
+
+### Removed
+- The gateway call pipeline: `CallCoordinator`, `SignalingProtocol`, `VoiceEnvironment` and the
+  gateway ICE-servers fetch. All internal.
+- Trickle-ICE members of the `@_spi(PolyVoice)` `CallMediaEngine` seam (`addRemoteCandidate`,
+  `setLocalCandidateHandler`), replaced by `awaitIceGathering(quiet:cap:)`, `localDescriptionSDP()`,
+  `audioMid()`, `acceptRemoteOffer(sdp:)` and `setRemoteAudioEnabled(_:)`. SPI, not public API.
+
+### Deprecated
+- `IceCandidate` — nothing in the public surface produces or consumes candidates now. Kept so
+  existing code still compiles; scheduled for removal next minor.
 
 ## [0.9.0] - 2026-07-20
 

@@ -138,38 +138,33 @@ you use for chat):
 > **Custom / self-hosted host:** pass `VoiceOptions(webrtcToken:, signalingHost:)` to point at a specific
 > gateway — or bridge — host (required when the environment is `.custom`).
 
-## Choosing a backend (`VoiceTransport`)
+## How a call connects
 
-PolyAI is migrating voice from **`webrtc-gateway`** to **`webrtc-bridge`**. The SDK ships both, and
-`VoiceOptions.transport` picks one:
+Calls are placed over PolyAI's **`webrtc-bridge`**. The older `webrtc-gateway` path was removed in
+MES-1658 — it is no longer operable, so there is nothing to choose between and **no API change**:
+the same `PolyVoice.call(config:options:)` with the same two credentials.
 
-```swift
-VoiceOptions(webrtcToken: "…")                       // .gateway — the default, today's path
-VoiceOptions(webrtcToken: "…", transport: .bridge)   // webrtc-bridge
-```
+What changed underneath, in case you're debugging a call:
 
-`.gateway` stays the default while the bridge finishes its production rollout, so **you don't have to
-do anything**. Opt into `.bridge` to test against it early.
-
-What actually changes, in case you're debugging a call:
-
-| | `.gateway` | `.bridge` |
+| | before (gateway) | now (bridge) |
 |---|---|---|
 | Call setup | one signalling WebSocket | `POST /api/v1/call`, then SDP over HTTPS |
 | Credential | token inside the SDP offer | `Authorization: Bearer` on provision |
 | Call id | minted by this SDK | minted by the bridge (`call-<8 hex>`) |
 | ICE | trickled after the offer | gathered **before** the offer is sent |
-| Agent audio | arrives on the first answer | a second negotiation after connect |
+| Agent audio | arrived on the first answer | a second negotiation after connect |
 | Media terminates at | PolyAI's gateway | Cloudflare's edge |
 | STUN fallback | `stun.l.google.com` | `stun.cloudflare.com` |
 
-Everything above the transport is identical: the same `PolyCall`, `CallState`, mute, audio routing,
-CallKit hooks and errors. A call placed on either backend links to the same messaging session, so
-the agent transcript is unchanged.
+Everything you bind to is unchanged: `PolyCall`, `CallState`, mute, audio routing, CallKit hooks and
+errors, and the call still links to the same messaging session, so the agent transcript is the same.
 
-> **Note:** because the app compiles in its host, switching backends is an **SDK version bump plus an
-> App Store release** — there is no server-side flag that can move a shipped app. Plan the migration
-> as a release, not a config change.
+`start()` still returns as soon as the call is under way, with the state `.connecting`; watch
+`states` for `.connected` exactly as before. The agent-track negotiation that starts the agent's
+audio runs after that, on your behalf.
+
+> **Custom / self-hosted:** `VoiceOptions.signalingHost` now names the **bridge** host (required with
+> a `.custom` environment).
 
 ## Audio routing
 

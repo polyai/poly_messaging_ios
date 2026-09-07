@@ -11,8 +11,8 @@ final class BridgeCallCoordinatorTests: XCTestCase {
         api: MockRestApi = MockRestApi(),
         bridge: FakeBridgeApi = FakeBridgeApi(),
         conn: MockConnection = MockConnection(),
-        channel: MockSignalingChannel = MockSignalingChannel(),
-        media: BridgeStubMediaEngine = BridgeStubMediaEngine(),
+        channel: MockEventsChannel = MockEventsChannel(),
+        media: StubMediaEngine = StubMediaEngine(),
         connectionTimeoutNanos: UInt64 = 30_000_000_000
     ) -> BridgeCallCoordinator {
         let logger = OSLogLogger(level: .none)
@@ -35,23 +35,27 @@ final class BridgeCallCoordinatorTests: XCTestCase {
         )
     }
 
-    /// Runs `start()` to completion: releases the messaging link with a
-    /// SESSION_START, then reports media as connected so the agent-track pull
-    /// (which the real bridge gates on a connected peer) can run.
+    /// Drives a call to fully negotiated: release the messaging link with a
+    /// SESSION_START so `start()` returns (call `.connecting`), then report media
+    /// as connected so the agent-track pull — which the real bridge gates on a
+    /// connected peer — can run.
     private func connect(
         _ coord: BridgeCallCoordinator,
         conn: MockConnection,
-        media: BridgeStubMediaEngine
+        media: StubMediaEngine
     ) async throws {
         let startTask = Task { try await coord.start() }
         let linked = await waitUntil { conn.connectCalls.count == 1 }
         XCTAssertTrue(linked, "linker opens the messaging WS")
         conn.simulateMessage(.sessionStart(makeEnvelope(), makeSessionStartPayload()))
-        // The pipeline suspends until media reports connected.
-        let offered = await waitUntil { media.acceptedAnswer != nil }
-        XCTAssertTrue(offered, "the answer is applied before we wait for media")
-        media.driveState(.connected)
         try await startTask.value
+
+        let offered = await waitUntil { media.acceptedAnswer != nil }
+        XCTAssertTrue(offered, "the answer is applied before media comes up")
+        media.driveState(.connected)
+        // The pull runs on after start(); wait for its renegotiation to land.
+        let pulled = await waitUntil { !media.acceptedOffers.isEmpty }
+        XCTAssertTrue(pulled, "the agent track is pulled once media connects")
     }
 
     // MARK: - Happy path
@@ -59,7 +63,7 @@ final class BridgeCallCoordinatorTests: XCTestCase {
     func test_pipeline_provisions_links_offers_pulls_andConnects() async throws {
         let bridge = FakeBridgeApi()
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(bridge: bridge, conn: conn, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -78,7 +82,7 @@ final class BridgeCallCoordinatorTests: XCTestCase {
     func test_messagingSessionIsLinkedToTheBridgeMintedCallId() async throws {
         let bridge = FakeBridgeApi()
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(bridge: bridge, conn: conn, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -111,7 +115,7 @@ final class BridgeCallCoordinatorTests: XCTestCase {
     func test_offerPostedIsTheGatheredDescription() async throws {
         let bridge = FakeBridgeApi()
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         media.gatheredSDP = "v=0\r\nwith-candidates"
         media.mid = "7"
         let coord = makeCoordinator(bridge: bridge, conn: conn, media: media)
@@ -125,7 +129,7 @@ final class BridgeCallCoordinatorTests: XCTestCase {
 
     func test_offerFailsWhenTheEngineExposesNoGatheredDescription() async throws {
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         media.gatheredSDP = nil
         let coord = makeCoordinator(conn: conn, media: media)
 
@@ -147,12 +151,12 @@ final class BridgeCallCoordinatorTests: XCTestCase {
     /// fallback — never the gateway's Google STUN default.
     func test_iceServers_fallBackToCloudflareStun() async throws {
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(conn: conn, media: media)
 
         try await connect(coord, conn: conn, media: media)
 
-        XCTAssertEqual(media.lastIceServers, IceServer.bridgeDefaultServers)
+        XCTAssertEqual(media.lastIceServers, IceServer.defaultServers)
         XCTAssertEqual(media.lastIceServers.first?.urls, ["stun:stun.cloudflare.com:3478"])
     }
 
@@ -172,7 +176,7 @@ final class BridgeCallCoordinatorTests: XCTestCase {
             )
         )
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(bridge: FakeBridgeApi(provision: provision), conn: conn, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -183,9 +187,9 @@ final class BridgeCallCoordinatorTests: XCTestCase {
     // MARK: - Events socket
 
     func test_eventsSocket_sendsTheAuthFrameFirst() async throws {
-        let channel = MockSignalingChannel()
+        let channel = MockEventsChannel()
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(conn: conn, channel: channel, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -200,9 +204,9 @@ final class BridgeCallCoordinatorTests: XCTestCase {
 
     func test_repullEvent_pullsTheAgentTrackAgain() async throws {
         let bridge = FakeBridgeApi()
-        let channel = MockSignalingChannel()
+        let channel = MockEventsChannel()
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(bridge: bridge, conn: conn, channel: channel, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -220,9 +224,9 @@ final class BridgeCallCoordinatorTests: XCTestCase {
     /// overlapping re-pulls are chained.
     func test_overlappingRepulls_areSerialised() async throws {
         let bridge = FakeBridgeApi()
-        let channel = MockSignalingChannel()
+        let channel = MockEventsChannel()
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(bridge: bridge, conn: conn, channel: channel, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -237,9 +241,9 @@ final class BridgeCallCoordinatorTests: XCTestCase {
     }
 
     func test_bargeInAndUnmute_controlTheAgentTrack() async throws {
-        let channel = MockSignalingChannel()
+        let channel = MockEventsChannel()
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(conn: conn, channel: channel, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -254,9 +258,9 @@ final class BridgeCallCoordinatorTests: XCTestCase {
     }
 
     func test_eventsSocketLoss_afterConnect_endsTheCall() async throws {
-        let channel = MockSignalingChannel()
+        let channel = MockEventsChannel()
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(conn: conn, channel: channel, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -270,9 +274,9 @@ final class BridgeCallCoordinatorTests: XCTestCase {
 
     func test_end_deletesTheCallAndReleasesEverything() async throws {
         let bridge = FakeBridgeApi()
-        let channel = MockSignalingChannel()
+        let channel = MockEventsChannel()
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(bridge: bridge, conn: conn, channel: channel, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -303,7 +307,7 @@ final class BridgeCallCoordinatorTests: XCTestCase {
 
     func test_mute_appliesToTheMicrophone() async throws {
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(conn: conn, media: media)
 
         try await connect(coord, conn: conn, media: media)
@@ -318,7 +322,7 @@ final class BridgeCallCoordinatorTests: XCTestCase {
 
     func test_connectTimeout_failsTheCall() async {
         let conn = MockConnection()
-        let media = BridgeStubMediaEngine()
+        let media = StubMediaEngine()
         let coord = makeCoordinator(conn: conn, media: media, connectionTimeoutNanos: 100_000_000)
 
         let startTask = Task { try? await coord.start() }

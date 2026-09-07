@@ -4,17 +4,17 @@ import Foundation
 import XCTest
 @_spi(PolyVoice) @testable import PolyMessaging
 
-// MARK: - Mock signaling channel
+// MARK: - Mock events channel
 
-/// In-memory `SignalingChannel` with a single-consumer replay buffer: events
+/// In-memory `EventsChannel` with a single-consumer replay buffer: events
 /// emitted before the coordinator's loop subscribes are buffered and flushed on
 /// subscription, so the pipeline can be driven deterministically without timing
 /// races.
-final class MockSignalingChannel: SignalingChannel, @unchecked Sendable {
+final class MockEventsChannel: EventsChannel, @unchecked Sendable {
 
     private let lock = NSLock()
-    private var continuation: AsyncStream<SignalingChannelEvent>.Continuation?
-    private var buffer: [SignalingChannelEvent] = []
+    private var continuation: AsyncStream<EventsChannelEvent>.Continuation?
+    private var buffer: [EventsChannelEvent] = []
 
     private(set) var sentFrames: [Data] = []
     private(set) var openCalled = false
@@ -24,7 +24,7 @@ final class MockSignalingChannel: SignalingChannel, @unchecked Sendable {
     /// coordinator's keep-buffered / requeue paths.
     var failSends = false
 
-    var events: AsyncStream<SignalingChannelEvent> {
+    var events: AsyncStream<EventsChannelEvent> {
         AsyncStream { cont in
             lock.lock()
             continuation = cont
@@ -53,7 +53,7 @@ final class MockSignalingChannel: SignalingChannel, @unchecked Sendable {
     }
 
     // Test driver
-    func emit(_ event: SignalingChannelEvent) {
+    func emit(_ event: EventsChannelEvent) {
         lock.lock()
         let cont = continuation
         if cont == nil { buffer.append(event) }
@@ -75,8 +75,9 @@ final class MockSignalingChannel: SignalingChannel, @unchecked Sendable {
 // MARK: - Stub media engine
 
 /// A `CallMediaEngine` that produces a fixed offer SDP and records every
-/// interaction. Lets unit tests drive the pipeline and the live probe supply a
-/// real Opus offer — without a real WebRTC stack.
+/// interaction, including the non-trickle gather wait and the agent-track
+/// renegotiation. Lets unit tests drive the whole pipeline — and the live probe
+/// supply a real Opus offer — without a real WebRTC stack.
 final class StubMediaEngine: CallMediaEngine, @unchecked Sendable {
 
     let offerSDP: String
@@ -85,10 +86,8 @@ final class StubMediaEngine: CallMediaEngine, @unchecked Sendable {
     private let lock = NSLock()
     private var _createOfferCount = 0
     private var _acceptedAnswer: String?
-    private var _remoteCandidates: [IceCandidate] = []
     private var _muted: Bool?
     private var _closeCount = 0
-    private var localHandler: (@Sendable (IceCandidate) -> Void)?
     private var stateHandler: (@Sendable (CallMediaState) -> Void)?
     private var interruptionHandler: (@Sendable (CallInterruption) -> Void)?
     private var audioStateHandler: (@Sendable (AudioState) -> Void)?
@@ -101,7 +100,6 @@ final class StubMediaEngine: CallMediaEngine, @unchecked Sendable {
 
     var createOfferCount: Int { lock.lock(); defer { lock.unlock() }; return _createOfferCount }
     var acceptedAnswer: String? { lock.lock(); defer { lock.unlock() }; return _acceptedAnswer }
-    var remoteCandidates: [IceCandidate] { lock.lock(); defer { lock.unlock() }; return _remoteCandidates }
     var muted: Bool? { lock.lock(); defer { lock.unlock() }; return _muted }
     var closeCount: Int { lock.lock(); defer { lock.unlock() }; return _closeCount }
 
@@ -116,14 +114,6 @@ final class StubMediaEngine: CallMediaEngine, @unchecked Sendable {
 
     func acceptAnswer(sdp: String) async throws {
         lock.lock(); _acceptedAnswer = sdp; lock.unlock()
-    }
-
-    func addRemoteCandidate(_ candidate: IceCandidate) async throws {
-        lock.lock(); _remoteCandidates.append(candidate); lock.unlock()
-    }
-
-    func setLocalCandidateHandler(_ handler: @escaping @Sendable (IceCandidate) -> Void) async {
-        lock.lock(); localHandler = handler; lock.unlock()
     }
 
     func setStateHandler(_ handler: @escaping @Sendable (CallMediaState) -> Void) async {
@@ -150,12 +140,51 @@ final class StubMediaEngine: CallMediaEngine, @unchecked Sendable {
         lock.lock(); _closeCount += 1; lock.unlock()
     }
 
-    // Test drivers
-    func emitLocalCandidate(_ candidate: IceCandidate) {
-        lock.lock(); let h = localHandler; lock.unlock()
-        h?(candidate)
+    // MARK: - Non-trickle negotiation
+
+    /// SDP reported by `localDescriptionSDP()` — the "gathered" offer, kept
+    /// distinct from `offerSDP` so a test can prove what is POSTed to the bridge
+    /// is the post-gathering description, not what `createOffer` returned.
+    var gatheredSDP: String? = "v=0\r\ngathered-offer"
+    var mid: String? = "0"
+    var renegotiationAnswer = "v=0\r\nrenegotiation-answer"
+    var acceptRemoteOfferError: Error?
+
+    private var _gatherWaits = 0
+    private var _acceptedOffers: [String] = []
+    private var _remoteAudioEnabled: [Bool] = []
+
+    var gatherWaits: Int { lock.lock(); defer { lock.unlock() }; return _gatherWaits }
+    var acceptedOffers: [String] { lock.lock(); defer { lock.unlock() }; return _acceptedOffers }
+    var remoteAudioEnabled: [Bool] { lock.lock(); defer { lock.unlock() }; return _remoteAudioEnabled }
+
+    func awaitIceGathering(quiet: TimeInterval, cap: TimeInterval) async {
+        lock.lock(); _gatherWaits += 1; lock.unlock()
     }
 
+    func localDescriptionSDP() async -> String? {
+        lock.lock(); defer { lock.unlock() }; return gatheredSDP
+    }
+
+    func audioMid() async -> String? {
+        lock.lock(); defer { lock.unlock() }; return mid
+    }
+
+    func acceptRemoteOffer(sdp: String) async throws -> String {
+        lock.lock()
+        _acceptedOffers.append(sdp)
+        let err = acceptRemoteOfferError
+        let answer = renegotiationAnswer
+        lock.unlock()
+        if let err { throw err }
+        return answer
+    }
+
+    func setRemoteAudioEnabled(_ enabled: Bool) async {
+        lock.lock(); _remoteAudioEnabled.append(enabled); lock.unlock()
+    }
+
+    // Test drivers
     func driveState(_ state: CallMediaState) {
         lock.lock(); let h = stateHandler; lock.unlock()
         h?(state)

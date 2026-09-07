@@ -39,13 +39,8 @@ public protocol CallMediaEngine: Sendable {
     /// Acquire the microphone and produce the local SDP offer (audio), building
     /// the peer connection with the supplied ICE (STUN/TURN) servers.
     func createOffer(iceServers: [IceServer]) async throws -> String
-    /// Apply the remote SDP answer returned by the gateway.
+    /// Apply the remote SDP answer the bridge returns for the offer.
     func acceptAnswer(sdp: String) async throws
-    /// Add a remote ICE candidate received from the gateway.
-    func addRemoteCandidate(_ candidate: IceCandidate) async throws
-    /// Register the sink for locally-gathered ICE candidates (forwarded to the
-    /// gateway by the pipeline).
-    func setLocalCandidateHandler(_ handler: @escaping @Sendable (IceCandidate) -> Void) async
     /// Register the sink for media connection-state transitions.
     func setStateHandler(_ handler: @escaping @Sendable (CallMediaState) -> Void) async
     /// Register the sink for audio-session interruptions (phone calls, Siri, etc.).
@@ -59,13 +54,11 @@ public protocol CallMediaEngine: Sendable {
     /// Tear down the peer connection and release the microphone.
     func close() async
 
-    // MARK: - webrtc-bridge capabilities
+    // MARK: - Non-trickle negotiation
     //
-    // The bridge is non-trickle and renegotiates to start agent audio, so it
-    // needs four things the gateway path never asked for. All are defaulted
-    // below: an engine that doesn't implement them simply can't drive a bridge
-    // call, and `BridgeCallCoordinator` reports that as a media failure rather
-    // than placing a call that would silently carry no audio.
+    // The bridge sends SDP over HTTPS with no candidate channel, and starts
+    // agent audio with a second negotiation — so unlike the retired gateway
+    // engine, these are core requirements, not optional extras.
 
     /// Wait until ICE gathering has settled, so the offer POSTed to the bridge
     /// already carries its candidates (the SDP proxy has no candidate channel).
@@ -100,10 +93,11 @@ public protocol CallMediaEngine: Sendable {
 /// adding a capability here is additive rather than a source break for existing
 /// conformers.
 ///
-/// Deliberately NOT defaulted: `createOffer`, `acceptAnswer`, `addRemoteCandidate`,
-/// `setLocalCandidateHandler`, `setStateHandler`, `setMuted` and `close`. A no-op
-/// default on any of those would turn a missing implementation into a silently
-/// broken call instead of a compile error — worse than the source break it avoids.
+/// Deliberately NOT defaulted: `createOffer`, `acceptAnswer`, `awaitIceGathering`,
+/// `localDescriptionSDP`, `acceptRemoteOffer`, `setStateHandler`, `setMuted` and
+/// `close`. A no-op default on any of those would turn a missing implementation
+/// into a silently broken call instead of a compile error — worse than the source
+/// break it avoids.
 @_spi(PolyVoice)
 public extension CallMediaEngine {
     /// Default: no interruption reporting (the call simply won't mute on a
@@ -116,22 +110,9 @@ public extension CallMediaEngine {
     /// Default: routing is left entirely to the system.
     func selectAudioDevice(_ device: AudioDevice?) async {}
 
-    /// Default: nothing to wait for (a trickle-only engine has no gather phase
-    /// the bridge could use).
-    func awaitIceGathering(quiet: TimeInterval, cap: TimeInterval) async {}
-
-    /// Default: the engine doesn't expose its local description, so the bridge
-    /// path cannot read a gathered offer from it.
-    func localDescriptionSDP() async -> String? { nil }
-
-    /// Default: unknown mid — the bridge falls back to the first audio m-line.
+    /// Default: unknown mid — the bridge falls back to the mid it reads out of
+    /// the offer.
     func audioMid() async -> String? { nil }
-
-    /// Default: renegotiation unsupported. Surfaced as a media failure rather
-    /// than a silent call with no agent audio.
-    func acceptRemoteOffer(sdp: String) async throws -> String {
-        throw PolyError.voice(.mediaFailed("this media engine cannot renegotiate"))
-    }
 
     /// Default: no remote-track control (barge-in plays out its buffered tail).
     func setRemoteAudioEnabled(_ enabled: Bool) async {}
