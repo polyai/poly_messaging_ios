@@ -1,7 +1,7 @@
 // Copyright PolyAI Limited
 
 import XCTest
-import PolyMessaging
+@_spi(PolyVoice) import PolyMessaging
 @testable import PolyVoice
 
 /// Tests for the PolyVoice product surface. The WebRTC-backed implementation is
@@ -20,6 +20,12 @@ final class PolyVoiceTests: XCTestCase {
         XCTAssertTrue(options.speakerphone, "hands-free is the default for a voice agent")
         XCTAssertNil(options.signalingHost)
         XCTAssertFalse(options.callKit, "CallKit integration is strictly opt-in")
+        XCTAssertEqual(options.transport, .gateway, "the shipped path stays the default")
+    }
+
+    func test_voiceOptions_bridgeTransportIsOptIn() {
+        let options = VoiceOptions(webrtcToken: "t", transport: .bridge)
+        XCTAssertEqual(options.transport, .bridge)
     }
 
     #if os(iOS)
@@ -61,6 +67,28 @@ final class PolyVoiceTests: XCTestCase {
         )
         XCTAssertEqual(call.state, .idle)
         XCTAssertFalse(call.state.isActive)
+    }
+
+    func test_call_bridgeTransport_buildsIdleCall_withRealEngine() throws {
+        // Same real engine, wired to the bridge pipeline instead of the gateway one.
+        let call = try PolyVoice.call(
+            config: Configuration(apiKey: "k"),
+            options: VoiceOptions(webrtcToken: "t", transport: .bridge)
+        )
+        XCTAssertEqual(call.state, .idle)
+    }
+
+    func test_call_bridgeTransport_customEnvironmentWithoutHost_throws() {
+        let custom = Configuration(
+            apiKey: "k",
+            environment: .custom(
+                restBaseURL: URL(string: "https://gw.example/api/v1")!,
+                wsBaseURL: URL(string: "wss://gw.example/ws")!
+            )
+        )
+        XCTAssertThrowsError(
+            try PolyVoice.call(config: custom, options: VoiceOptions(webrtcToken: "t", transport: .bridge))
+        )
     }
 
     func test_call_callKitMode_buildsIdleCall() throws {
@@ -145,6 +173,90 @@ final class CallKitAudioSeamTests: XCTestCase {
         XCTAssertFalse(RTCAudioSession.sharedInstance().useManualAudio,
                        "a non-CallKit call resets the process-global manual-audio flag")
         await engine.close()
+    }
+}
+#endif
+
+// MARK: - Bridge capabilities on the real engine (iOS-only)
+
+#if os(iOS)
+/// Exercises the four capabilities the `webrtc-bridge` path adds, against the real
+/// WebRTC engine on a simulator: the non-trickle gather wait, the gathered local
+/// description, the mic transceiver's mid, and remote-track control.
+final class WebRTCBridgeCapabilityTests: XCTestCase {
+
+    /// The heart of the non-trickle change: after the wait, the local description
+    /// must already carry candidates, because the bridge's SDP proxy has no
+    /// candidate channel to trickle them down later.
+    func test_awaitIceGathering_thenLocalDescriptionCarriesCandidates() async throws {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        defer { Task { await engine.close() } }
+
+        _ = try await engine.createOffer(iceServers: IceServer.bridgeDefaultServers)
+        await engine.awaitIceGathering(quiet: 0.2, cap: 2.0)
+
+        let gathered = await engine.localDescriptionSDP()
+        let sdp = try XCTUnwrap(gathered)
+        XCTAssertTrue(sdp.contains("m=audio"))
+        XCTAssertTrue(sdp.contains("a=candidate"), "the offer POSTed to the bridge must carry its candidates")
+    }
+
+    /// The mid tells the SFU which m-line carries the published mic track.
+    func test_audioMid_identifiesTheMicrophoneTransceiver() async throws {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        defer { Task { await engine.close() } }
+
+        _ = try await engine.createOffer(iceServers: [])
+        let mid = await engine.audioMid()
+        XCTAssertEqual(mid, "0", "the single audio m-line is mid 0")
+    }
+
+    /// Barge-in can fire before a re-pull has delivered a track; that must be a
+    /// no-op rather than a crash, and the intent is applied when the track lands.
+    func test_setRemoteAudioEnabled_isSafeBeforeAnyRemoteTrack() async throws {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        defer { Task { await engine.close() } }
+
+        _ = try await engine.createOffer(iceServers: [])
+        await engine.setRemoteAudioEnabled(false)
+        await engine.setRemoteAudioEnabled(true)
+    }
+
+    /// A renegotiation offer that isn't valid SDP must surface as a media failure,
+    /// not leave the peer in a half-applied state.
+    func test_acceptRemoteOffer_rejectsInvalidSdp() async throws {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        defer { Task { await engine.close() } }
+
+        _ = try await engine.createOffer(iceServers: [])
+        do {
+            _ = try await engine.acceptRemoteOffer(sdp: "not-an-sdp")
+            XCTFail("expected the invalid renegotiation offer to throw")
+        } catch {
+            // Any error is acceptable; the point is that it does not succeed.
+        }
+    }
+
+    func test_acceptRemoteOffer_withNoPeer_throwsMediaFailed() async {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        do {
+            _ = try await engine.acceptRemoteOffer(sdp: "v=0")
+            XCTFail("expected a media failure without a peer connection")
+        } catch {
+            guard case PolyError.voice(.mediaFailed) = error else {
+                return XCTFail("expected .mediaFailed, got \(error)")
+            }
+        }
     }
 }
 #endif

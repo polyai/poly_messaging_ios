@@ -52,6 +52,7 @@ public enum PolyVoice {
             config: config,
             webrtcToken: options.webrtcToken,
             signalingHost: options.signalingHost,
+            transport: options.transport,
             mediaEngine: engine
         )
     }

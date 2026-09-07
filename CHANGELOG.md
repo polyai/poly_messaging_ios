@@ -4,6 +4,28 @@ All notable changes to the PolyMessaging iOS SDK are documented here.
 This project adheres to [Semantic Versioning](https://semver.org). While the SDK
 is pre-1.0, breaking changes bump the **minor** version.
 
+## [Unreleased]
+
+### Added
+- **`VoiceTransport`** — choose the WebRTC backend a call uses:
+  `VoiceOptions(webrtcToken:, transport: .bridge)` places the call over `webrtc-bridge`
+  instead of `webrtc-gateway` (MES-1658). `.gateway` remains the default, so existing
+  apps are unaffected.
+- Bridge call pipeline (`BridgeCallCoordinator`): provision over
+  `POST /api/v1/call`, SDP over HTTPS, a control socket for barge-in and agent-track
+  re-pulls, and `DELETE /api/v1/call/{id}` teardown. The messaging session links to the
+  **bridge-minted** call id, so provision now runs before the link on this path.
+- Five `CallMediaEngine` capabilities behind the bridge path, all with default
+  implementations so existing conformers keep compiling: `awaitIceGathering(quiet:cap:)`
+  (non-trickle gathering), `localDescriptionSDP()`, `audioMid()`, `acceptRemoteOffer(sdp:)`
+  (the agent-track renegotiation) and `setRemoteAudioEnabled(_:)` (barge-in).
+- `IceServer.bridgeDefaultServers` — Cloudflare STUN, the fallback on the bridge path
+  when the provision response carries no `iceServers` (RUN-1780).
+
+### Changed
+- `PolyCall` now holds any `CallDriver` rather than a concrete `CallCoordinator`, so the
+  same public surface covers both backends. No public API change.
+
 ## [0.9.0] - 2026-07-20
 
 Adds **PolyVoice** — live, two-way WebRTC voice calls to a PolyAI agent — as a

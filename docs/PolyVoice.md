@@ -129,14 +129,47 @@ you use for chat):
 | Value | What it is | Sent as |
 |---|---|---|
 | **Connector token** — `Configuration.apiKey` | your connector token | `X-Token` (authenticates the call) |
-| **Web calling token** — `VoiceOptions.webrtcToken` | the media-gateway auth token — a **distinct** token from the connector token | the offer `authToken` + ICE-servers fetch |
+| **Web calling token** — `VoiceOptions.webrtcToken` | the media auth token — a **distinct** token from the connector token | the offer `authToken` (gateway) or `Authorization: Bearer` (bridge) |
 
 > **Region:** calls default to the US gateway. For a UK / EUW / other-region (or dev) agent, set the
 > environment on the shared `Configuration` — e.g. `Configuration(apiKey: …, environment: .cluster("…"))`,
 > the same `Configuration` you use for chat. See the [messaging guide](../README.md#configuration).
 >
-> **Custom / self-hosted gateway:** pass `VoiceOptions(webrtcToken:, signalingHost:)` to point at a specific
-> gateway host (required when the environment is `.custom`).
+> **Custom / self-hosted host:** pass `VoiceOptions(webrtcToken:, signalingHost:)` to point at a specific
+> gateway — or bridge — host (required when the environment is `.custom`).
+
+## Choosing a backend (`VoiceTransport`)
+
+PolyAI is migrating voice from **`webrtc-gateway`** to **`webrtc-bridge`**. The SDK ships both, and
+`VoiceOptions.transport` picks one:
+
+```swift
+VoiceOptions(webrtcToken: "…")                       // .gateway — the default, today's path
+VoiceOptions(webrtcToken: "…", transport: .bridge)   // webrtc-bridge
+```
+
+`.gateway` stays the default while the bridge finishes its production rollout, so **you don't have to
+do anything**. Opt into `.bridge` to test against it early.
+
+What actually changes, in case you're debugging a call:
+
+| | `.gateway` | `.bridge` |
+|---|---|---|
+| Call setup | one signalling WebSocket | `POST /api/v1/call`, then SDP over HTTPS |
+| Credential | token inside the SDP offer | `Authorization: Bearer` on provision |
+| Call id | minted by this SDK | minted by the bridge (`call-<8 hex>`) |
+| ICE | trickled after the offer | gathered **before** the offer is sent |
+| Agent audio | arrives on the first answer | a second negotiation after connect |
+| Media terminates at | PolyAI's gateway | Cloudflare's edge |
+| STUN fallback | `stun.l.google.com` | `stun.cloudflare.com` |
+
+Everything above the transport is identical: the same `PolyCall`, `CallState`, mute, audio routing,
+CallKit hooks and errors. A call placed on either backend links to the same messaging session, so
+the agent transcript is unchanged.
+
+> **Note:** because the app compiles in its host, switching backends is an **SDK version bump plus an
+> App Store release** — there is no server-side flag that can move a shipped app. Plan the migration
+> as a release, not a config change.
 
 ## Audio routing
 
@@ -201,11 +234,24 @@ Both example apps ship a **speaker toggle**.
 ## Architecture
 
 `PolyVoice` provides a real `CallMediaEngine` (an `RTCPeerConnection` audio engine)
-and an `AVAudioSession` controller, injected into the existing `PolyMessaging`
-`CallCoordinator` via `PolyCall.wired(config:webrtcToken:signalingHost:mediaEngine:)`
-(SPI — `@_spi(PolyVoice)`, not public API). The
-signaling pipeline (auth → session → link → signaling → offer/answer/ICE) lives in
-`PolyMessaging` and is exercised end-to-end by its test suite.
+and an `AVAudioSession` controller, injected into a `PolyMessaging` call pipeline via
+`PolyCall.wired(config:webrtcToken:signalingHost:transport:mediaEngine:)`
+(SPI — `@_spi(PolyVoice)`, not public API).
+
+There are two pipelines behind that seam, one per `VoiceTransport`, because the two backends
+negotiate differently rather than merely talking over different sockets:
+
+| | `CallCoordinator` (`.gateway`) | `BridgeCallCoordinator` (`.bridge`) |
+|---|---|---|
+| Steps | auth → session → link → signal → offer/answer/ICE | auth → session → **provision** → link → offer → connect → pull agent track → events socket |
+| Signalling | `GatewaySignalingChannel` + `SignalingProtocol` | `BridgeApi` (HTTPS) + the same channel for control events |
+| Framing | `SignalingProtocol` | `BridgeProtocol` |
+
+Both conform to `CallDriver`, so `PolyCall` holds either and knows about neither. The whole of each
+pipeline is exercised over fakes in `PolyMessagingTests` (no sockets, no WebRTC), and the media
+engine's bridge capabilities — the non-trickle gather wait, the renegotiation answer, the mid, and
+remote-track muting — are exercised against the real WebRTC engine in `PolyVoiceTests` on an iOS
+simulator.
 
 ---
 

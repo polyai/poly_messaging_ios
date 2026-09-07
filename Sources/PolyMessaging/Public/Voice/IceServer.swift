@@ -23,4 +23,13 @@ public struct IceServer: Sendable, Equatable {
     public static let defaultServers: [IceServer] = [
         IceServer(urls: ["stun:stun.l.google.com:19302"]),
     ]
+
+    /// STUN fallback for the `webrtc-bridge` path. Media terminates at
+    /// Cloudflare's edge there, so Cloudflare's own STUN endpoint is the
+    /// supported one — never the gateway's servers. Used only until the bridge
+    /// returns an authoritative `iceServers` list in its provision response
+    /// (RUN-1780), which will carry TURN for calls that need a relay.
+    public static let bridgeDefaultServers: [IceServer] = [
+        IceServer(urls: ["stun:stun.cloudflare.com:3478"]),
+    ]
 }

@@ -58,6 +58,40 @@ public protocol CallMediaEngine: Sendable {
     func setMuted(_ muted: Bool) async
     /// Tear down the peer connection and release the microphone.
     func close() async
+
+    // MARK: - webrtc-bridge capabilities
+    //
+    // The bridge is non-trickle and renegotiates to start agent audio, so it
+    // needs four things the gateway path never asked for. All are defaulted
+    // below: an engine that doesn't implement them simply can't drive a bridge
+    // call, and `BridgeCallCoordinator` reports that as a media failure rather
+    // than placing a call that would silently carry no audio.
+
+    /// Wait until ICE gathering has settled, so the offer POSTed to the bridge
+    /// already carries its candidates (the SDP proxy has no candidate channel).
+    ///
+    /// Not keyed on `iceGatheringState == .complete`: a STUN transaction that
+    /// never terminates pins that state at `.gathering` forever and suppresses
+    /// the end-of-candidates signal with it. Implementations should treat a
+    /// quiet candidate stream as settled and use `cap` only as a backstop.
+    func awaitIceGathering(quiet: TimeInterval, cap: TimeInterval) async
+
+    /// SDP of the current local description — read after ``awaitIceGathering(quiet:cap:)``
+    /// to get the offer with its candidates in it.
+    func localDescriptionSDP() async -> String?
+
+    /// The `mid` of the microphone's audio transceiver, which tells the SFU
+    /// which m-line carries the published track.
+    func audioMid() async -> String?
+
+    /// Apply a remote offer and return the answer (the bridge's agent-track
+    /// renegotiation, which happens once on connect and again on every re-pull).
+    func acceptRemoteOffer(sdp: String) async throws -> String
+
+    /// Enable or disable playback of the received agent track. Used for
+    /// barge-in: the SFU and jitter buffer already hold audio the client can't
+    /// drop, so the track is muted the instant the bridge signals barge-in.
+    func setRemoteAudioEnabled(_ enabled: Bool) async
 }
 
 // MARK: - Optional capabilities
@@ -81,4 +115,24 @@ public extension CallMediaEngine {
 
     /// Default: routing is left entirely to the system.
     func selectAudioDevice(_ device: AudioDevice?) async {}
+
+    /// Default: nothing to wait for (a trickle-only engine has no gather phase
+    /// the bridge could use).
+    func awaitIceGathering(quiet: TimeInterval, cap: TimeInterval) async {}
+
+    /// Default: the engine doesn't expose its local description, so the bridge
+    /// path cannot read a gathered offer from it.
+    func localDescriptionSDP() async -> String? { nil }
+
+    /// Default: unknown mid — the bridge falls back to the first audio m-line.
+    func audioMid() async -> String? { nil }
+
+    /// Default: renegotiation unsupported. Surfaced as a media failure rather
+    /// than a silent call with no agent audio.
+    func acceptRemoteOffer(sdp: String) async throws -> String {
+        throw PolyError.voice(.mediaFailed("this media engine cannot renegotiate"))
+    }
+
+    /// Default: no remote-track control (barge-in plays out its buffered tail).
+    func setRemoteAudioEnabled(_ enabled: Bool) async {}
 }

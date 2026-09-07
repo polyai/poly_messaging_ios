@@ -34,7 +34,7 @@ public extension CallState {
 @MainActor
 public final class PolyCall: ObservableObject {
 
-    private let coordinator: CallCoordinator?
+    private let coordinator: (any CallDriver)?
     private let config: Configuration?
 
     private let stateCaster = Multicaster<CallState>(replayLastValue: true)
@@ -69,7 +69,10 @@ public final class PolyCall: ObservableObject {
 
     /// Internal seam: drive a fully-wired pipeline (used by the test suite and
     /// the opt-in live integration probe with an injected media engine).
-    init(coordinator: CallCoordinator) {
+    ///
+    /// Takes any ``CallDriver``, so the same public surface covers a gateway
+    /// call (``CallCoordinator``) and a bridge call (``BridgeCallCoordinator``).
+    init(coordinator: any CallDriver) {
         self.config = nil
         self.coordinator = coordinator
         let states = coordinator.stateStream
@@ -151,7 +154,8 @@ public extension PolyCall {
     /// - Parameters:
     ///   - config: the shared messaging `Configuration` (connector token, environment, host).
     ///   - webrtcToken: the web calling token (the offer `authToken` + ICE-servers auth).
-    ///   - signalingHost: optional gateway-host override (required for `.custom`).
+    ///   - signalingHost: optional host override for the selected transport (required for `.custom`).
+    ///   - transport: `.gateway` (default) or `.bridge` — see ``VoiceTransport``.
     ///   - mediaEngine: the platform WebRTC engine that produces the SDP offer and carries audio.
     /// - Throws: `PolyError.invalidConfiguration` for a `.custom` environment without a `signalingHost`.
     ///
@@ -164,6 +168,7 @@ public extension PolyCall {
         config: Configuration,
         webrtcToken: String,
         signalingHost: String? = nil,
+        transport: VoiceTransport = .gateway,
         mediaEngine: CallMediaEngine
     ) throws -> PolyCall {
         let logger = OSLogLogger(level: config.logLevel)
@@ -180,22 +185,45 @@ public extension PolyCall {
             wsBaseURL: urls.wsBaseURL,
             logger: logger
         )
-        let voiceEnv = try VoiceEnvironment(environment: config.environment, signalingHost: signalingHost)
-        let channel = GatewaySignalingChannel(url: voiceEnv.signalingURL, logger: logger)
-        let iceServers = GatewayIceServersFetcher(
-            url: voiceEnv.iceServersURL(token: webrtcToken),
-            logger: logger
-        )
-        let coordinator = CallCoordinator(
-            api: api,
-            linker: linker,
-            channel: channel,
-            media: mediaEngine,
-            iceServers: iceServers,
-            authToken: webrtcToken,
-            streamingEnabled: config.streamingEnabled,
-            logger: logger
-        )
-        return PolyCall(coordinator: coordinator)
+        switch transport {
+        case .gateway:
+            let voiceEnv = try VoiceEnvironment(environment: config.environment, signalingHost: signalingHost)
+            let channel = GatewaySignalingChannel(url: voiceEnv.signalingURL, logger: logger)
+            let iceServers = GatewayIceServersFetcher(
+                url: voiceEnv.iceServersURL(token: webrtcToken),
+                logger: logger
+            )
+            let coordinator = CallCoordinator(
+                api: api,
+                linker: linker,
+                channel: channel,
+                media: mediaEngine,
+                iceServers: iceServers,
+                authToken: webrtcToken,
+                streamingEnabled: config.streamingEnabled,
+                logger: logger
+            )
+            return PolyCall(coordinator: coordinator)
+
+        case .bridge:
+            let bridgeEnv = try BridgeEnvironment(environment: config.environment, bridgeHost: signalingHost)
+            let bridge = BridgeApi(
+                baseURL: bridgeEnv.baseURL,
+                authToken: webrtcToken,
+                logger: logger
+            )
+            let coordinator = BridgeCallCoordinator(
+                api: api,
+                bridge: bridge,
+                linker: linker,
+                media: mediaEngine,
+                // The events socket reuses the gateway's channel: same
+                // URLSession WebSocket lifecycle, different framing on top.
+                makeEventsChannel: { url in GatewaySignalingChannel(url: url, logger: logger) },
+                streamingEnabled: config.streamingEnabled,
+                logger: logger
+            )
+            return PolyCall(coordinator: coordinator)
+        }
     }
 }

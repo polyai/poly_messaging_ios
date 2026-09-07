@@ -292,10 +292,15 @@ Task { for await state in call.states { render(state) } }   // .connecting → .
 try await call.start()   // after the microphone permission (NSMicrophoneUsageDescription) is granted
 ```
 
+Calls run over PolyAI's `webrtc-gateway` by default. To place them over the newer **`webrtc-bridge`**
+instead, pass `VoiceOptions(webrtcToken: "…", transport: .bridge)` — everything else (state, mute,
+audio routing, CallKit) is unchanged. See
+[Choosing a backend](docs/PolyVoice.md#choosing-a-backend-voicetransport).
+
 A call needs **two credentials, both required and distinct**, from
 [Agent Studio](https://studio.poly.ai) › **Connector Settings** (the same connector you use for chat):
 the **connector token** (`Configuration.apiKey`, authenticates the connector) and the **web calling token**
-(`VoiceOptions.webrtcToken`, authenticates the media gateway).
+(`VoiceOptions.webrtcToken`, authenticates the media backend).
 
 Add **`PolyVoice`** via SPM (`.product(name: "PolyVoice", package: "ios-sdk")`) or CocoaPods
 (`pod 'PolyVoice'`). **📖 Full guide → [`docs/PolyVoice.md`](docs/PolyVoice.md)** — credentials, the

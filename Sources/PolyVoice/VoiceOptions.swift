@@ -1,6 +1,7 @@
 // Copyright PolyAI Limited
 
 import Foundation
+import PolyMessaging
 
 /// Options for ``PolyVoice/call(config:options:)``.
 ///
@@ -18,10 +19,16 @@ public struct VoiceOptions: Sendable {
     /// accessory is always preferred automatically.
     public let speakerphone: Bool
 
-    /// Override the WebRTC gateway host (e.g. a self-hosted or dev gateway). When
-    /// nil the host is derived from `Configuration.environment`. **Required** when
-    /// the environment is `.custom`.
+    /// Override the host of the selected ``transport`` — the WebRTC gateway, or
+    /// the bridge when ``transport`` is `.bridge` (e.g. a self-hosted, dev or
+    /// port-forwarded deployment). When nil the host is derived from
+    /// `Configuration.environment`. **Required** when the environment is `.custom`.
     public let signalingHost: String?
+
+    /// Which WebRTC backend to place the call through. Defaults to
+    /// ``VoiceTransport/gateway`` — the shipped path. Set `.bridge` to use
+    /// `webrtc-bridge` (RUN-1279).
+    public let transport: VoiceTransport
 
     /// Set `true` when the app drives this call through **CallKit** (`CXProvider`).
     ///
@@ -41,11 +48,13 @@ public struct VoiceOptions: Sendable {
         webrtcToken: String,
         speakerphone: Bool = true,
         signalingHost: String? = nil,
+        transport: VoiceTransport = .gateway,
         callKit: Bool = false
     ) {
         self.webrtcToken = webrtcToken
         self.speakerphone = speakerphone
         self.signalingHost = signalingHost
+        self.transport = transport
         self.callKit = callKit
     }
 }

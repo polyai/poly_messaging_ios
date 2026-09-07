@@ -47,6 +47,13 @@ struct GatewayIceServersFetcher: IceServersProviding {
               let array = json["iceServers"] as? [[String: Any]] else {
             return []
         }
+        return parseServers(array)
+    }
+
+    /// Parse the entries of an `iceServers` array. Shared with the bridge, whose
+    /// provision response carries the same objects inline rather than behind a
+    /// dedicated endpoint.
+    static func parseServers(_ array: [[String: Any]]) -> [IceServer] {
         return array.compactMap { obj in
             let urls: [String]
             if let list = obj["urls"] as? [String] {
