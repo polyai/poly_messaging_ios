@@ -45,7 +45,19 @@ observe its `state` (`.idle → .connecting → .connected → .ended` / `.faile
 ### SwiftUI
 
 `PolyCall` is an `ObservableObject`, so a view that binds it re-renders itself on every
-state / audio-route change — no `for await` loop to write.
+state / audio-route change — no `for await` loop to write. There's no
+`PolyMessaging.initialize(...)` to add at launch (unlike the [chat quick start](../README.md#quick-start)) —
+`PolyVoice.call(...)` takes its `Configuration` directly — so the app file is just the template:
+
+```swift
+// MyApp.swift
+import SwiftUI
+
+@main
+struct MyApp: App {
+    var body: some Scene { WindowGroup { ContentView() } }
+}
+```
 
 ```swift
 // ContentView.swift
@@ -189,10 +201,6 @@ private struct CallPanel: View {
     }
 }
 ```
-
-> A fresh Xcode iOS App template's default `@main` `App` (`WindowGroup { ContentView() }`)
-> needs no changes — `PolyVoice.call(...)` takes its `Configuration` directly, so there's
-> no `PolyMessaging.initialize(...)` to add at launch (unlike the [chat quick start](../README.md#quick-start)).
 
 ### UIKit
 
@@ -350,8 +358,8 @@ final class CallViewController: UIViewController {
 }
 ```
 
-> A fresh Xcode iOS App template already wires an `AppDelegate` + `SceneDelegate` for you
-> — no `PolyMessaging.initialize(...)` needed at launch (see the SwiftUI note above). Set
+> A fresh Xcode iOS App template already wires an `AppDelegate` + `SceneDelegate` for you —
+> no `PolyMessaging.initialize(...)` needed at launch, same as SwiftUI above. Set
 > `CallViewController` as the storyboard's initial view controller, or set
 > `window.rootViewController = CallViewController()` in `SceneDelegate.scene(_:willConnectTo:options:)`.
 
