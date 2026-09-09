@@ -46,26 +46,17 @@ observe its `state` (`.idle → .connecting → .connected → .ended` / `.faile
 
 `PolyCall` is an `ObservableObject`, so a view that binds it re-renders itself on every
 state / audio-route change — no `for await` loop to write. `PolyVoice.call(...)` takes its
-own `Configuration`, so `PolyMessaging.initialize(...)` at launch is only needed if this
-app *also* uses chat ([quick start](../README.md#quick-start)) — initializing once here
-keeps environment / host in sync between the two:
+own `Configuration` (see [Credentials](#credentials) below for the connector token + web
+calling token, and how to point it at a non-US region), so unlike the
+[chat quick start](../README.md#quick-start) there's no `PolyMessaging.initialize(...)` to
+add at launch — the app file is just the template:
 
 ```swift
 // MyApp.swift
 import SwiftUI
-import PolyMessaging
 
 @main
 struct MyApp: App {
-    init() {
-        // Only needed if this app also uses chat — PolyVoice.call(...) below takes its
-        // own Configuration and works without this.
-        PolyMessaging.initialize(.init(
-            apiKey: "YOUR_CONNECTOR_TOKEN",   // Agent Studio → Connector Settings
-            environment: .us,                 // .us (default) | .uk | .euw | .cluster("dev") | .custom(...)
-            hostIdentifier: "YOUR_HOST"       // defaults to your bundle id — omit unless it differs
-        ))
-    }
     var body: some Scene { WindowGroup { ContentView() } }
 }
 ```
@@ -370,8 +361,7 @@ final class CallViewController: UIViewController {
 ```
 
 > A fresh Xcode iOS App template already wires an `AppDelegate` + `SceneDelegate` for you —
-> add the same optional `PolyMessaging.initialize(...)` call shown for SwiftUI above to
-> `AppDelegate.application(_:didFinishLaunchingWithOptions:)` if this app also uses chat. Set
+> no `PolyMessaging.initialize(...)` needed at launch, same as SwiftUI above. Set
 > `CallViewController` as the storyboard's initial view controller, or set
 > `window.rootViewController = CallViewController()` in `SceneDelegate.scene(_:willConnectTo:options:)`.
 
