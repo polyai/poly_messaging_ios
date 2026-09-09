@@ -1,7 +1,7 @@
 Pod::Spec.new do |s|
   s.name             = 'PolyMessaging'
   # Keep in sync with Sources/PolyMessaging/Public/Version.swift and CHANGELOG.md.
-  s.version          = '0.10.0'
+  s.version          = '0.11.0'
   s.summary          = 'Fully managed chat over the PolyAI Messaging API for iOS.'
   s.description      = <<-DESC
     PolyMessaging is a dependency-free Swift SDK for the PolyAI Messaging API:
