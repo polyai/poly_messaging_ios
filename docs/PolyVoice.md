@@ -33,27 +33,27 @@ pod 'PolyVoice', '~> 0.10.0'   # chat-only apps use `pod 'PolyMessaging'`
 ## Quick start
 
 The smallest working call, in both toolkits. Make a new Xcode App project, drop your
-connector token + web calling token into `PolyVoice.call(...)`, and Cmd+R on a physical
-device (WebRTC media needs real hardware — see [Troubleshooting](#troubleshooting)).
-Only `import PolyVoice` (plus `PolyMessaging` for the shared `Configuration` / `PolyError`
-types) — no helper files to copy.
+connector token + web calling token into `PolyMessaging.initialize(...)`, and Cmd+R on a
+physical device (WebRTC media needs real hardware — see [Troubleshooting](#troubleshooting)).
+Only `import PolyVoice` (plus `PolyMessaging` for `initialize(...)` and the shared
+`PolyError` type) — no helper files to copy.
 
-The core shape either way: `PolyVoice.call(config:options:)` returns a `PolyCall` —
-observe its `state` (`.idle → .connecting → .connected → .ended` / `.failed`) and call
-`start()` / `end()` / `setMuted(_:)`.
+The core shape either way: `PolyVoice.call()` returns a `PolyCall` — observe its `state`
+(`.idle → .connecting → .connected → .ended` / `.failed`) and call `start()` / `end()` /
+`setMuted(_:)`. `call()` reads the `Configuration` from `PolyMessaging.initialize(...)`,
+the same way `PolyMessaging.chat()` does for chat; pass one explicitly with
+`call(config:options:)` instead if this call needs a different connector.
 
 ### SwiftUI
 
 `PolyCall` is an `ObservableObject`, so a view that binds it re-renders itself on every
 state / audio-route change — no `for await` loop to write.
 
-`PolyMessaging.initialize(...)` at launch sets the shared `Configuration` — the connector
-token (`apiKey`) plus, if this agent isn't on the default US cluster, `environment` /
-`hostIdentifier` (see [Configuration](../README.md#configuration)). `PolyVoice.call(...)`
-below takes that same `Configuration` again explicitly (it doesn't read the one `initialize`
-stored), plus a **second, distinct credential on `VoiceOptions`**: `webrtcToken`, the
-**web calling token** — see [Credentials](#credentials) below. Both tokens come from the
-same connector in Agent Studio; the call needs both to authenticate.
+Both credentials — the connector token (`apiKey`) and the **web calling token**
+(`webrtcToken`, see [Credentials](#credentials) below) — go on the same `Configuration`,
+set once in `PolyMessaging.initialize(...)` at launch. `PolyVoice.call()` below then needs
+no arguments at all — it reads that `Configuration` back, the same way `PolyMessaging.chat()`
+does for chat:
 
 ```swift
 // MyApp.swift
@@ -64,7 +64,8 @@ import PolyMessaging
 struct MyApp: App {
     init() {
         PolyMessaging.initialize(.init(
-            apiKey: "YOUR_CONNECTOR_TOKEN"   // Agent Studio → Connector Settings
+            apiKey: "YOUR_CONNECTOR_TOKEN",       // Agent Studio → Connector Settings
+            webrtcToken: "YOUR_WEB_CALLING_TOKEN" // same place — needed only for PolyVoice.call()
         ))
     }
     var body: some Scene { WindowGroup { ContentView() } }
@@ -103,13 +104,9 @@ struct ContentView: View {
     }
 
     private func startCall() {
-        // Fill in your connector from Agent Studio › Connector Settings.
-        let config = Configuration(apiKey: "YOUR_CONNECTOR_TOKEN")
         do {
-            let newCall = try PolyVoice.call(
-                config: config,
-                options: VoiceOptions(webrtcToken: "YOUR_WEB_CALLING_TOKEN")
-            )
+            // No config/options to pass — PolyVoice.call() reads what MyApp.swift set.
+            let newCall = try PolyVoice.call()
             setupFailure = nil
             call = newCall
             Task { try? await newCall.start() }
@@ -229,7 +226,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         PolyMessaging.initialize(.init(
-            apiKey: "YOUR_CONNECTOR_TOKEN"   // Agent Studio → Connector Settings
+            apiKey: "YOUR_CONNECTOR_TOKEN",       // Agent Studio → Connector Settings
+            webrtcToken: "YOUR_WEB_CALLING_TOKEN" // same place — needed only for PolyVoice.call()
         ))
         return true
     }
@@ -318,14 +316,10 @@ final class CallViewController: UIViewController {
     }
 
     private func startCall() {
-        // Fill in your connector from Agent Studio › Connector Settings.
-        let config = Configuration(apiKey: "YOUR_CONNECTOR_TOKEN")
         let newCall: PolyCall
         do {
-            newCall = try PolyVoice.call(
-                config: config,
-                options: VoiceOptions(webrtcToken: "YOUR_WEB_CALLING_TOKEN")
-            )
+            // No config/options to pass — PolyVoice.call() reads what AppDelegate set.
+            newCall = try PolyVoice.call()
         } catch {
             state = .failed(error as? PolyError ?? .voice(.signalingFailed("\(error)")))
             return
@@ -483,13 +477,19 @@ you use for chat):
 | Value | What it is | Sent as |
 |---|---|---|
 | **Connector token** — `Configuration.apiKey` | your connector token | `X-Token` (authenticates the call) |
-| **Web calling token** — `VoiceOptions.webrtcToken` | the media auth token — a **distinct** token from the connector token | `Authorization: Bearer` when the call is provisioned |
+| **Web calling token** — `Configuration.webrtcToken` or `VoiceOptions.webrtcToken` | the media auth token — a **distinct** token from the connector token | `Authorization: Bearer` when the call is provisioned |
+
+Set the web calling token on **either** type — `VoiceOptions.webrtcToken` wins when both are
+set, so it's the one to reach for if a single app juggles multiple agents/tokens. Most apps
+have just one: set it once on `Configuration` (alongside `apiKey`) and leave `VoiceOptions`'s
+copy `nil`, as the [quick start](#quick-start) above does — one value then covers both
+`PolyMessaging.initialize(...)` (chat) and `PolyVoice.call(...)` (voice).
 
 > **Region:** calls default to the US cluster. For a UK / EUW / other-region (or dev) agent, set the
 > environment on the shared `Configuration` — e.g. `Configuration(apiKey: …, environment: .cluster("…"))`,
 > the same `Configuration` you use for chat. See the [messaging guide](../README.md#configuration).
 >
-> **Custom / self-hosted host:** pass `VoiceOptions(webrtcToken:, signalingHost:)` to point at a
+> **Custom / self-hosted host:** pass `VoiceOptions(signalingHost:)` to point at a
 > specific `webrtc-bridge` deployment (required when the environment is `.custom`).
 
 ## How a call connects

@@ -32,13 +32,9 @@ struct ContentView: View {
     }
 
     private func startCall() {
-        // Fill in your connector from Agent Studio › Connector Settings.
-        let config = Configuration(apiKey: "YOUR_CONNECTOR_TOKEN")
         do {
-            let newCall = try PolyVoice.call(
-                config: config,
-                options: VoiceOptions(webrtcToken: "YOUR_WEB_CALLING_TOKEN")
-            )
+            // No config/options to pass — PolyVoice.call() reads what VoiceApp.swift set.
+            let newCall = try PolyVoice.call()
             setupFailure = nil
             call = newCall
             Task { try? await newCall.start() }

@@ -5,18 +5,23 @@ import PolyMessaging
 
 /// Options for ``PolyVoice/call(config:options:)``.
 ///
-/// `webrtcToken` is **required** — every voice call needs the web calling
-/// token, a distinct value from the connector token (both come from Agent
-/// Studio › Connector Settings).
+/// A web calling token is **required** — every voice call needs it, a distinct
+/// value from the connector token (both come from Agent Studio › Connector
+/// Settings) — but it doesn't have to be set here: leave `webrtcToken` `nil`
+/// to fall back to `Configuration.webrtcToken`, so an app that sets both
+/// tokens once on `Configuration` at launch never repeats the web calling
+/// token at a `PolyVoice.call(...)` site.
 ///
 /// > Note: calls are placed over `webrtc-bridge`. The retired `webrtc-gateway`
-/// > path is gone (MES-1658), but this type is unchanged — the same options
-/// > mean the same things.
+/// > path is gone (MES-1658); the remaining options still control audio routing,
+/// > custom hosts, and CallKit integration.
 public struct VoiceOptions: Sendable {
 
     /// The connector's web calling token — the Bearer credential the bridge
     /// provisions a call against. Always distinct from `Configuration.apiKey`.
-    public let webrtcToken: String
+    /// `nil` falls back to `Configuration.webrtcToken`; `PolyVoice.call(...)`
+    /// throws `PolyError.invalidConfiguration` if neither is set.
+    public let webrtcToken: String?
 
     /// The fallback route when no headset/Bluetooth is connected: the loudspeaker
     /// (hands-free, the `true` default) or the earpiece (`false`). A connected
@@ -44,7 +49,7 @@ public struct VoiceOptions: Sendable {
     public let callKit: Bool
 
     public init(
-        webrtcToken: String,
+        webrtcToken: String? = nil,
         speakerphone: Bool = true,
         signalingHost: String? = nil,
         callKit: Bool = false

@@ -9,14 +9,15 @@ open VoiceUIKit.xcodeproj   # from this folder
 ```
 
 1. Set your team under **Signing & Capabilities** (a device build needs one).
-2. In `CallViewController.swift`, fill in both credentials from **Agent Studio › Connector Settings**: `apiKey` (your connector token, currently `"YOUR_CONNECTOR_TOKEN"`) and `webrtcToken` (the web calling token — a **distinct** value, currently `"YOUR_WEB_CALLING_TOKEN"`).
+2. In `AppDelegate.swift`, fill in both credentials from **Agent Studio › Connector Settings**: `apiKey` (your connector token, currently `"YOUR_CONNECTOR_TOKEN"`) and `webrtcToken` (the web calling token — a **distinct** value, currently `"YOUR_WEB_CALLING_TOKEN"`).
 3. Run on a **physical iPhone** — the simulator can't carry WebRTC media. Allow the microphone, tap **Start call**, and talk.
 
 Mic permission (`NSMicrophoneUsageDescription`) and the `audio` background mode are already configured via `project.yml`, so the call keeps running when you background the app.
 
 ## What this example demonstrates
 
-- `PolyVoice.call(config:options:)` → a `PolyCall` (built, not yet started)
+- `PolyMessaging.initialize(...)` at launch (`AppDelegate.swift`), then `PolyVoice.call()` with no
+  arguments (`CallViewController.swift`) — reads that `Configuration` back → a `PolyCall` (built, not yet started)
 - `for await state in call.states` — `.idle → .connecting → .connected → .ended / .failed`
 - `try await call.start()` after the mic permission, `await call.end()` any time
 - `call.setMuted(_:)` for the local microphone
@@ -28,21 +29,29 @@ Mic permission (`NSMicrophoneUsageDescription`) and the `audio` background mode 
 
 Each subsection leads with **the SDK call** (the actual API), then shows **how it's wired into the view controller**.
 
+### Set both tokens once — `AppDelegate.swift`
+
+```swift
+PolyMessaging.initialize(.init(
+    apiKey: "YOUR_CONNECTOR_TOKEN",       // connector token
+    webrtcToken: "YOUR_WEB_CALLING_TOKEN" // web calling token — a distinct value
+))
+```
+
 ### Build the call — `CallViewController.swift`
 
 ```swift
-let call = try PolyVoice.call(
-    config: Configuration(apiKey: "YOUR_CONNECTOR_TOKEN"),            // connector token
-    options: VoiceOptions(webrtcToken: "YOUR_WEB_CALLING_TOKEN")   // web calling token — a distinct value
-)   // throws PolyError.invalidConfiguration on a blank token,
-    // or a .custom environment without VoiceOptions.signalingHost
+let call = try PolyVoice.call()
+// reads the Configuration set above — no config/options to pass here.
+// throws PolyError.invalidConfiguration on a blank token,
+// or a .custom environment without VoiceOptions.signalingHost
 ```
 
 `startCall()` wraps this in `do/catch` and keeps the result in a property:
 
 ```swift
 do {
-    newCall = try PolyVoice.call(config: config, options: VoiceOptions(webrtcToken: "…"))
+    newCall = try PolyVoice.call()
 } catch {
     state = .failed(error as? PolyError ?? .voice(.signalingFailed("\(error)")))
     return
@@ -50,7 +59,7 @@ do {
 call = newCall
 ```
 
-**Under the hood:** building the call does no network work — it validates the tokens and wires the WebRTC engine to the same REST/session/signaling pipeline the SDK's tests exercise. Everything starts at `start()`. The two tokens do different jobs: the connector token authenticates the call session, the web calling token authenticates the signaling offer and the ICE-servers fetch.
+**Under the hood:** building the call does no network work — it validates the tokens and wires the WebRTC engine to the same REST/session/signaling pipeline the SDK's tests exercise. Everything starts at `start()`. The two tokens do different jobs: the connector token authenticates the call session, the web calling token authenticates the signaling offer and the ICE-servers fetch. Need a different connector than the one `initialize(...)` set? Pass it explicitly with `PolyVoice.call(config:options:)` instead.
 
 *See [voice guide › Credentials](../../../../docs/PolyVoice.md#credentials).*
 

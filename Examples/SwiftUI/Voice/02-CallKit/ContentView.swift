@@ -71,16 +71,11 @@ struct ContentView: View {
     }
 
     private func startCall() {
-        // Fill in your connector from Agent Studio › Connector Settings.
-        let config = Configuration(apiKey: "YOUR_CONNECTOR_TOKEN")
         let newCall: PolyCall
         do {
+            // No config to pass — PolyVoice.call() reads what VoiceApp.swift set.
             newCall = try PolyVoice.call(
-                config: config,
-                options: VoiceOptions(
-                    webrtcToken: "YOUR_WEB_CALLING_TOKEN",
-                    callKit: callKitAvailable // audio start/stop deferred to CallKit
-                )
+                options: VoiceOptions(callKit: callKitAvailable) // audio start/stop deferred to CallKit
             )
         } catch {
             setupFailure = error as? PolyError ?? .voice(.signalingFailed("\(error)"))
