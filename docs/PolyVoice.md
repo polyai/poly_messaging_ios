@@ -45,18 +45,28 @@ observe its `state` (`.idle → .connecting → .connected → .ended` / `.faile
 ### SwiftUI
 
 `PolyCall` is an `ObservableObject`, so a view that binds it re-renders itself on every
-state / audio-route change — no `for await` loop to write. `PolyVoice.call(...)` takes its
-own `Configuration` (see [Credentials](#credentials) below for the connector token + web
-calling token, and how to point it at a non-US region), so unlike the
-[chat quick start](../README.md#quick-start) there's no `PolyMessaging.initialize(...)` to
-add at launch — the app file is just the template:
+state / audio-route change — no `for await` loop to write.
+
+`PolyMessaging.initialize(...)` at launch sets the shared `Configuration` — the connector
+token (`apiKey`) plus, if this agent isn't on the default US cluster, `environment` /
+`hostIdentifier` (see [Configuration](../README.md#configuration)). `PolyVoice.call(...)`
+below takes that same `Configuration` again explicitly (it doesn't read the one `initialize`
+stored), plus a **second, distinct credential on `VoiceOptions`**: `webrtcToken`, the
+**web calling token** — see [Credentials](#credentials) below. Both tokens come from the
+same connector in Agent Studio; the call needs both to authenticate.
 
 ```swift
 // MyApp.swift
 import SwiftUI
+import PolyMessaging
 
 @main
 struct MyApp: App {
+    init() {
+        PolyMessaging.initialize(.init(
+            apiKey: "YOUR_CONNECTOR_TOKEN"   // Agent Studio → Connector Settings
+        ))
+    }
     var body: some Scene { WindowGroup { ContentView() } }
 }
 ```
@@ -205,6 +215,30 @@ private struct CallPanel: View {
 ```
 
 ### UIKit
+
+```swift
+//
+//  AppDelegate.swift
+//
+
+import UIKit
+import PolyMessaging
+
+@main
+class AppDelegate: UIResponder, UIApplicationDelegate {
+
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        PolyMessaging.initialize(.init(
+            apiKey: "YOUR_CONNECTOR_TOKEN"   // Agent Studio → Connector Settings
+        ))
+        return true
+    }
+
+    func application(_ application: UIApplication, configurationForConnecting connectingSceneSession: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
+    }
+}
+```
 
 ```swift
 //
@@ -360,9 +394,8 @@ final class CallViewController: UIViewController {
 }
 ```
 
-> A fresh Xcode iOS App template already wires an `AppDelegate` + `SceneDelegate` for you —
-> no `PolyMessaging.initialize(...)` needed at launch, same as SwiftUI above. Set
-> `CallViewController` as the storyboard's initial view controller, or set
+> A fresh Xcode iOS App template already wires a `SceneDelegate` and a storyboard for you.
+> Set `CallViewController` as the storyboard's initial view controller, or set
 > `window.rootViewController = CallViewController()` in `SceneDelegate.scene(_:willConnectTo:options:)`.
 
 `CallState`, `PolyError`, and `Configuration` are the same types from `PolyMessaging`.
