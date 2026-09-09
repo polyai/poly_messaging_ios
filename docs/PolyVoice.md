@@ -129,14 +129,42 @@ you use for chat):
 | Value | What it is | Sent as |
 |---|---|---|
 | **Connector token** — `Configuration.apiKey` | your connector token | `X-Token` (authenticates the call) |
-| **Web calling token** — `VoiceOptions.webrtcToken` | the media-gateway auth token — a **distinct** token from the connector token | the offer `authToken` + ICE-servers fetch |
+| **Web calling token** — `VoiceOptions.webrtcToken` | the media auth token — a **distinct** token from the connector token | `Authorization: Bearer` when the call is provisioned |
 
-> **Region:** calls default to the US gateway. For a UK / EUW / other-region (or dev) agent, set the
+> **Region:** calls default to the US cluster. For a UK / EUW / other-region (or dev) agent, set the
 > environment on the shared `Configuration` — e.g. `Configuration(apiKey: …, environment: .cluster("…"))`,
 > the same `Configuration` you use for chat. See the [messaging guide](../README.md#configuration).
 >
-> **Custom / self-hosted gateway:** pass `VoiceOptions(webrtcToken:, signalingHost:)` to point at a specific
-> gateway host (required when the environment is `.custom`).
+> **Custom / self-hosted host:** pass `VoiceOptions(webrtcToken:, signalingHost:)` to point at a
+> specific `webrtc-bridge` deployment (required when the environment is `.custom`).
+
+## How a call connects
+
+Calls are placed over PolyAI's **`webrtc-bridge`**. The older `webrtc-gateway` path was removed in
+MES-1658 — it is no longer operable, so there is nothing to choose between and **no API change**:
+the same `PolyVoice.call(config:options:)` with the same two credentials.
+
+What changed underneath, in case you're debugging a call:
+
+| | before (gateway) | now (bridge) |
+|---|---|---|
+| Call setup | one signalling WebSocket | `POST /api/v1/call`, then SDP over HTTPS |
+| Credential | token inside the SDP offer | `Authorization: Bearer` on provision |
+| Call id | minted by this SDK | minted by the bridge (`call-<8 hex>`) |
+| ICE | trickled after the offer | gathered **before** the offer is sent |
+| Agent audio | arrived on the first answer | a second negotiation after connect |
+| Media terminates at | PolyAI's gateway | Cloudflare's edge |
+| STUN fallback | `stun.l.google.com` | `stun.cloudflare.com` |
+
+Everything you bind to is unchanged: `PolyCall`, `CallState`, mute, audio routing, CallKit hooks and
+errors, and the call still links to the same messaging session, so the agent transcript is the same.
+
+`start()` still returns as soon as the call is under way, with the state `.connecting`; watch
+`states` for `.connected` exactly as before. The agent-track negotiation that starts the agent's
+audio runs after that, on your behalf.
+
+> **Custom / self-hosted:** `VoiceOptions.signalingHost` now names the **bridge** host (required with
+> a `.custom` environment).
 
 ## Audio routing
 
@@ -177,10 +205,10 @@ Both example apps ship a **speaker toggle**.
 - **Call connects but is silent (no CallKit)** — check the mic permission was granted
   (Settings › *your app* › Microphone) and that nothing else in the app deactivated the
   `AVAudioSession` mid-call.
-- **`failed(.voice(.timedOut))` after ~30 s** — signaling reached the gateway but media
+- **`failed(.voice(.timedOut))` after ~30 s** — signalling reached the bridge but media
   never connected: usually a firewalled/relay-only network where the TURN fetch failed
   (the SDK then falls back to STUN, which can't cross symmetric NAT). Check connectivity
-  or the gateway's ICE endpoint.
+  or the bridge's provision route.
 - **Works on Wi-Fi, dies on the walk to the car** — transient drops reconnect
   automatically (see [Resilience](#resilience)); a `.disconnected` failure is retryable
   (`error.isRetryable`) — offer a redial button.
@@ -189,7 +217,7 @@ Both example apps ship a **speaker toggle**.
 
 ## Resilience
 
-- **Connectivity:** STUN/TURN servers are fetched from the gateway per call, so calls connect
+- **Connectivity:** STUN/TURN servers come from the bridge's provision response per call, so calls connect
   behind symmetric NAT / CGNAT (falls back to public STUN if the fetch fails).
 - **Reconnect:** a dropped signaling socket reconnects automatically (backoff 1s / 2s / 4s) on
   the same session and re-flushes buffered ICE before the call is failed.
@@ -201,11 +229,28 @@ Both example apps ship a **speaker toggle**.
 ## Architecture
 
 `PolyVoice` provides a real `CallMediaEngine` (an `RTCPeerConnection` audio engine)
-and an `AVAudioSession` controller, injected into the existing `PolyMessaging`
-`CallCoordinator` via `PolyCall.wired(config:webrtcToken:signalingHost:mediaEngine:)`
-(SPI — `@_spi(PolyVoice)`, not public API). The
-signaling pipeline (auth → session → link → signaling → offer/answer/ICE) lives in
-`PolyMessaging` and is exercised end-to-end by its test suite.
+and an `AVAudioSession` controller, injected into a `PolyMessaging` call pipeline via
+`PolyCall.wired(config:webrtcToken:signalingHost:transport:mediaEngine:)`
+(SPI — `@_spi(PolyVoice)`, not public API).
+
+There are two pipelines behind that seam, one per `VoiceTransport`, because the two backends
+negotiate differently rather than merely talking over different sockets:
+
+`BridgeCallCoordinator` runs the whole call:
+
+| Step | What it does |
+|---|---|
+| 1-2 | access token, then a messaging session (`RestApi`) |
+| 3 | `POST /api/v1/call` provisions the call and returns its id (`BridgeApi`) |
+| 4 | links the messaging session to **that** id (`VoiceSessionLinker`) |
+| 5 | the gathered offer over HTTPS, answer applied — `start()` returns here |
+| 6-7 | media connects, then the agent track is pulled and renegotiated |
+| 8 | the control socket carries barge-in and re-pull (`WebSocketEventsChannel`) |
+
+Framing lives in `BridgeProtocol`. The whole pipeline is exercised over fakes in
+`PolyMessagingTests` (no sockets, no WebRTC), and the media engine's non-trickle gather wait,
+renegotiation answer, mid and remote-track muting are exercised against the real WebRTC engine in
+`PolyVoiceTests` on an iOS simulator.
 
 ---
 

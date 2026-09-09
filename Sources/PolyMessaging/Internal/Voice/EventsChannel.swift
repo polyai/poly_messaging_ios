@@ -2,17 +2,17 @@
 
 import Foundation
 
-/// Lifecycle + inbound events from the WebRTC signaling WebSocket.
-enum SignalingChannelEvent: Sendable {
+/// Lifecycle + inbound frames from the bridge's control (events) WebSocket.
+enum EventsChannelEvent: Sendable {
     case opened
     case message(Data)
     case closed(code: Int, reason: String)
     case failed(PolyError)
 }
 
-/// Abstraction over the signaling WebSocket so the call pipeline can be driven
-/// against a mock in tests and the live gateway in production.
-protocol SignalingChannel: Sendable {
+/// Abstraction over the control WebSocket so the call pipeline can be driven
+/// against a mock in tests and the live bridge in production.
+protocol EventsChannel: Sendable {
     /// Open the socket. Lifecycle is reported through `events` (`.opened` first).
     func open() async
     /// Send a pre-encoded JSON frame. Returns whether the frame was handed to the
@@ -22,21 +22,21 @@ protocol SignalingChannel: Sendable {
     func send(_ data: Data) async -> Bool
     /// Close the socket and stop emitting events.
     func close() async
-    var events: AsyncStream<SignalingChannelEvent> { get }
+    var events: AsyncStream<EventsChannelEvent> { get }
 }
 
-/// `URLSessionWebSocketTask`-backed signaling channel for the WebRTC gateway.
-final class GatewaySignalingChannel: SignalingChannel, @unchecked Sendable {
+/// `URLSessionWebSocketTask`-backed control channel for the bridge's events socket.
+final class WebSocketEventsChannel: EventsChannel, @unchecked Sendable {
 
     private let url: URL
     private let logger: PolyLogger
 
     private var task: URLSessionWebSocketTask?
     private var urlSession: URLSession?
-    private var delegate: SignalingSocketDelegate?
+    private var delegate: EventsSocketDelegate?
     private var receiveTask: Task<Void, Never>?
 
-    private let caster = Multicaster<SignalingChannelEvent>()
+    private let caster = Multicaster<EventsChannelEvent>()
     private let lock = NSLock()
     private var terminated = false
     // Each open() starts a new connection generation. Delegate callbacks and
@@ -50,7 +50,7 @@ final class GatewaySignalingChannel: SignalingChannel, @unchecked Sendable {
         self.logger = logger
     }
 
-    var events: AsyncStream<SignalingChannelEvent> { caster.subscribe() }
+    var events: AsyncStream<EventsChannelEvent> { caster.subscribe() }
 
     func open() async {
         // Reset for a fresh connection so the same instance can be re-opened on
@@ -67,8 +67,8 @@ final class GatewaySignalingChannel: SignalingChannel, @unchecked Sendable {
         // is a torn refcount, not merely a stale value.
         releaseConnection()
 
-        logger.debug("Opening signaling WS", metadata: ["host": url.host ?? "unknown"])
-        let del = SignalingSocketDelegate(
+        logger.debug("Opening bridge events WS", metadata: ["host": url.host ?? "unknown"])
+        let del = EventsSocketDelegate(
             onOpen: { [weak self] in self?.emitCurrent(gen, .opened) },
             onClose: { [weak self] code, reason in
                 let text = reason.flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -153,7 +153,7 @@ final class GatewaySignalingChannel: SignalingChannel, @unchecked Sendable {
     }
 
     /// Emit a non-terminal event, dropping it if it belongs to a superseded connection.
-    private func emitCurrent(_ gen: Int, _ event: SignalingChannelEvent) {
+    private func emitCurrent(_ gen: Int, _ event: EventsChannelEvent) {
         lock.lock()
         let current = gen == generation && !terminated
         lock.unlock()
@@ -161,7 +161,7 @@ final class GatewaySignalingChannel: SignalingChannel, @unchecked Sendable {
     }
 
     /// Emit a terminal event exactly once per generation, dropping stale ones.
-    private func emitTerminal(_ gen: Int, _ event: SignalingChannelEvent) {
+    private func emitTerminal(_ gen: Int, _ event: EventsChannelEvent) {
         lock.lock()
         if gen != generation || terminated { lock.unlock(); return }
         terminated = true
@@ -194,9 +194,9 @@ final class GatewaySignalingChannel: SignalingChannel, @unchecked Sendable {
     }
 }
 
-/// `URLSessionWebSocketDelegate` for the signaling channel. Mirrors the chat
+/// `URLSessionWebSocketDelegate` for the events channel. Mirrors the chat
 /// transport's delegate: open / close / handshake-failure callbacks.
-private final class SignalingSocketDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+private final class EventsSocketDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
     let onOpen: @Sendable () -> Void
     let onClose: @Sendable (URLSessionWebSocketTask.CloseCode, Data?) -> Void
     let onError: @Sendable (Error) -> Void

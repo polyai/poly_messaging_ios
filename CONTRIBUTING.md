@@ -83,9 +83,17 @@ chore(release): 0.5.0
 Releases are cut manually:
 
 1. Conventional commits land on `main`.
-2. To cut a release, bump the version in all three places — `Sources/PolyMessaging/Public/Version.swift`, `PolyMessaging.podspec`, and a new `CHANGELOG.md` entry — then tag `vX.Y.Z`.
-3. Publish the CocoaPod: `pod trunk push PolyMessaging.podspec` (requires a one-time `pod trunk register`). The `:tag` in the podspec must match the `vX.Y.Z` tag, so push only after tagging.
-4. The version literal in `Version.swift` is the single source of truth — it is the User-Agent the SDK sends and the version surfaced to example apps. The podspec version must mirror it exactly. **Bump them only when cutting a release, never in feature PRs.**
+2. To cut a release, bump the version in all four places — `Sources/PolyMessaging/Public/Version.swift`, `PolyMessaging.podspec`, `PolyVoice.podspec`, and a new `CHANGELOG.md` entry — then tag `vX.Y.Z`. The two podspecs are released together and always carry the same version, because `PolyVoice` depends on `PolyMessaging` at an exact version.
+3. Publish the CocoaPods, **in this order** (requires a one-time `pod trunk register`):
+
+   ```bash
+   pod trunk push PolyMessaging.podspec
+   pod trunk push PolyVoice.podspec   # depends on PolyMessaging — push only once the above is live
+   ```
+
+   The `:tag` in each podspec must match the `vX.Y.Z` tag, so push only after tagging. `PolyVoice`
+   will fail validation until the `PolyMessaging` push has propagated to the trunk index.
+4. The version literal in `Version.swift` is the single source of truth — it is the User-Agent the SDK sends and the version surfaced to example apps. Both podspec versions must mirror it exactly. **Bump them only when cutting a release, never in feature PRs.**
 
 ## Verifying changes before opening a PR
 

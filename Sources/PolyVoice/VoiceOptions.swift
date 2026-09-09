@@ -1,16 +1,21 @@
 // Copyright PolyAI Limited
 
 import Foundation
+import PolyMessaging
 
 /// Options for ``PolyVoice/call(config:options:)``.
 ///
 /// `webrtcToken` is **required** — every voice call needs the web calling
 /// token, a distinct value from the connector token (both come from Agent
 /// Studio › Connector Settings).
+///
+/// > Note: calls are placed over `webrtc-bridge`. The retired `webrtc-gateway`
+/// > path is gone (MES-1658), but this type is unchanged — the same options
+/// > mean the same things.
 public struct VoiceOptions: Sendable {
 
-    /// The connector's web calling token — authenticates the signaling offer + the
-    /// ICE-servers fetch. Always distinct from `Configuration.apiKey`.
+    /// The connector's web calling token — the Bearer credential the bridge
+    /// provisions a call against. Always distinct from `Configuration.apiKey`.
     public let webrtcToken: String
 
     /// The fallback route when no headset/Bluetooth is connected: the loudspeaker
@@ -18,9 +23,10 @@ public struct VoiceOptions: Sendable {
     /// accessory is always preferred automatically.
     public let speakerphone: Bool
 
-    /// Override the WebRTC gateway host (e.g. a self-hosted or dev gateway). When
-    /// nil the host is derived from `Configuration.environment`. **Required** when
-    /// the environment is `.custom`.
+    /// Override the media host — the `webrtc-bridge` deployment a call is placed
+    /// through (e.g. a self-hosted, dev or port-forwarded bridge). When nil the
+    /// host is derived from `Configuration.environment`. **Required** when the
+    /// environment is `.custom`.
     public let signalingHost: String?
 
     /// Set `true` when the app drives this call through **CallKit** (`CXProvider`).

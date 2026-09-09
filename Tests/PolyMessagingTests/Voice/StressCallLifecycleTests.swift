@@ -7,250 +7,223 @@ import XCTest
 /// chat `StressLifecycleRace` / `StressReconnectStorm` suites). Invariants:
 ///  1. `start()` is idempotent and `end()` mid-`start()` aborts the pipeline
 ///     cleanly (no offer into a dead call, resources released).
-///  2. Repeated signaling drop→reconnect cycles never fail a healthy call, and
-///     ICE generated inside every gap is delivered after each reconnect.
-///  3. Inbound remote-ICE bursts that beat the answer are buffered and flushed
-///     in arrival order.
-///  4. Terminal states are sticky: `end()` after a failure must not repaint
+///  2. Terminal states are sticky: `end()` after a failure must not repaint
 ///     `.failed` as `.ended`, and repeated `end()` tears down exactly once.
+///  3. A burst of `repull` events can never interleave two renegotiations on
+///     one peer connection.
+///  4. The call is deleted server-side exactly once, however it ends.
+///
+/// The gateway's reconnect-storm and ICE-buffering probes retired with the
+/// gateway: the bridge has no candidate channel, and a lost control socket ends
+/// the call rather than reconnecting.
 final class StressCallLifecycleTests: XCTestCase {
 
     private func makeCoordinator(
         api: MockRestApi = MockRestApi(),
+        bridge: FakeBridgeApi = FakeBridgeApi(),
         conn: MockConnection = MockConnection(),
-        channel: MockSignalingChannel = MockSignalingChannel(),
+        channel: MockEventsChannel = MockEventsChannel(),
         media: StubMediaEngine = StubMediaEngine()
-    ) -> CallCoordinator {
+    ) -> BridgeCallCoordinator {
         let logger = NoopLogger()
         let linker = VoiceSessionLinker(
             connection: conn,
             wsBaseURL: URL(string: "wss://messaging.test/ws")!,
             logger: logger
         )
-        return CallCoordinator(
+        return BridgeCallCoordinator(
             api: api,
+            bridge: bridge,
             linker: linker,
-            channel: channel,
             media: media,
-            authToken: "tok",
+            makeEventsChannel: { _ in channel },
             streamingEnabled: true,
             logger: logger,
-            disconnectGraceNanos: 300_000_000,
-            reconnectBaseNanos: 20_000_000,          // fast backoff for tests
-            reconnectConnectTimeoutNanos: 400_000_000
+            iceQuiet: 0.01,
+            iceCap: 0.05
         )
     }
 
-    private func arm(_ coord: CallCoordinator, conn: MockConnection) async throws {
+    /// Drive `start()` to a connected call.
+    @discardableResult
+    private func connect(
+        _ coord: BridgeCallCoordinator,
+        conn: MockConnection,
+        media: StubMediaEngine
+    ) async throws -> Bool {
         let startTask = Task { try await coord.start() }
-        let connected = await waitUntil { conn.connectCalls.count == 1 }
-        XCTAssertTrue(connected, "linker opens the messaging WS")
+        _ = await waitUntil { conn.connectCalls.count == 1 }
         conn.simulateMessage(.sessionStart(makeEnvelope(), makeSessionStartPayload()))
         try await startTask.value
-    }
-
-    /// Drive an armed coordinator to `.connected` with a known session id.
-    private func connect(_ coord: CallCoordinator, channel: MockSignalingChannel, media: StubMediaEngine) async {
-        channel.emit(.opened)
-        _ = await waitUntil { channel.sentFrames(ofType: "offer").count == 1 }
-        channel.emit(.message(frame([
-            "type": "answer", "sessionId": "sig_1",
-            "data": ["type": "answer", "sdp": "v=0"],
-        ])))
-        _ = await waitUntil { media.acceptedAnswer == "v=0" }
+        _ = await waitUntil { media.acceptedAnswer != nil }
         media.driveState(.connected)
-        let connected = await waitUntil { await coord.state == .connected }
-        XCTAssertTrue(connected)
+        // The agent-track pull runs on after start() returns.
+        return await waitUntil { !media.acceptedOffers.isEmpty }
     }
 
-    private func frame(_ obj: [String: Any]) -> Data {
-        (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
-    }
+    // MARK: - 1. start / end races
 
-    private func iceFrame(_ candidate: String) -> Data {
-        frame(["type": "ice-candidate", "data": ["candidate": candidate, "sdpMid": "0", "sdpMLineIndex": 0]])
-    }
-
-    // MARK: - start()/end() races
-
-    func test_doubleStart_armsPipelineOnce() async throws {
-        let api = MockRestApi()
+    func test_start_isIdempotent() async throws {
+        let bridge = FakeBridgeApi()
         let conn = MockConnection()
         let media = StubMediaEngine()
-        let coord = makeCoordinator(api: api, conn: conn, media: media)
-        try await arm(coord, conn: conn)
+        let coord = makeCoordinator(bridge: bridge, conn: conn, media: media)
 
-        // A second start() on the live call must be a no-op, not a re-auth.
+        try await connect(coord, conn: conn, media: media)
+        // A second start() on a live call must be a no-op — not a second call
+        // provisioned server-side.
         try await coord.start()
-        XCTAssertEqual(api.obtainTokenCallCount, 1)
-        XCTAssertEqual(api.createSessionCallCount, 1)
-        XCTAssertEqual(media.createOfferCount, 1)
+
+        XCTAssertEqual(bridge.provisionCount, 1, "a live call is never re-provisioned")
         XCTAssertEqual(conn.connectCalls.count, 1)
     }
 
-    func test_endMidStart_abortsPipeline() async throws {
+    func test_endDuringStart_abortsBeforeTheOfferIsSent() async throws {
+        let bridge = FakeBridgeApi()
         let conn = MockConnection()
-        let channel = MockSignalingChannel()
-        let media = StubMediaEngine()
-        let coord = makeCoordinator(conn: conn, channel: channel, media: media)
+        let coord = makeCoordinator(bridge: bridge, conn: conn)
 
-        // start() is suspended inside the linker (awaiting SESSION_START)…
-        let startTask = Task { try await coord.start() }
+        let startTask = Task { try? await coord.start() }
+        // End while the pipeline is still waiting on the messaging link.
         _ = await waitUntil { conn.connectCalls.count == 1 }
-
-        // …when the user hangs up.
         await coord.end()
-        let ended = await waitUntil { await coord.state == .ended }
-        XCTAssertTrue(ended)
-
-        // The linker then resolves — the pipeline must notice it's dead and abort.
         conn.simulateMessage(.sessionStart(makeEnvelope(), makeSessionStartPayload()))
-        do {
-            try await startTask.value
-            XCTFail("start() must throw when the call was ended mid-pipeline")
-        } catch {
-            XCTAssertEqual(error as? PolyError, .voice(.signalingFailed("Call ended before it connected")))
-        }
+        _ = await startTask.value
 
-        // No offer went out into the dead call, resources were released, and
-        // the abort didn't repaint the user's .ended as .failed.
-        XCTAssertTrue(channel.sentFrames(ofType: "offer").isEmpty)
-        let released = await waitUntil { media.closeCount >= 1 && channel.closeCalled }
-        XCTAssertTrue(released, "media + channel released after an aborted start")
+        XCTAssertTrue(bridge.sentOffers.isEmpty, "no offer is POSTed into a call that already ended")
         let state = await coord.state
         XCTAssertEqual(state, .ended)
     }
 
-    // MARK: - Reconnect storm
-
-    func test_reconnectStorm_survivesAndDeliversEveryGapCandidate() async throws {
+    func test_endDuringStart_stillDeletesTheProvisionedCall() async throws {
+        let bridge = FakeBridgeApi()
         let conn = MockConnection()
-        let channel = MockSignalingChannel()
-        let media = StubMediaEngine()
-        let coord = makeCoordinator(conn: conn, channel: channel, media: media)
-        try await arm(coord, conn: conn)
-        await connect(coord, channel: channel, media: media)
+        let coord = makeCoordinator(bridge: bridge, conn: conn)
 
-        for cycle in 1...4 {
-            let opensBefore = channel.openCount
-            channel.emit(.closed(code: 1006, reason: "storm \(cycle)"))
-            let reopening = await waitUntil { channel.openCount > opensBefore }
-            XCTAssertTrue(reopening, "cycle \(cycle): the drop triggers a reconnect")
+        let startTask = Task { try? await coord.start() }
+        _ = await waitUntil { bridge.provisionCount == 1 }
+        await coord.end()
+        _ = await startTask.value
 
-            // A candidate generated inside the gap must be buffered, then
-            // delivered once the reconnect lands.
-            media.emitLocalCandidate(IceCandidate(candidate: "cand:gap-\(cycle)", sdpMid: "0", sdpMLineIndex: 0))
-            channel.emit(.opened)
-            let delivered = await waitUntil {
-                channel.sentFrames(ofType: "ice-candidate")
-                    .contains { ($0["data"] as? [String: Any])?["candidate"] as? String == "cand:gap-\(cycle)" }
-            }
-            XCTAssertTrue(delivered, "cycle \(cycle): the gap candidate is flushed after reconnect")
-
-            // The reconnect loop polls signalingConnected every 100ms before it
-            // clears its in-flight flag; a drop emitted inside that window is
-            // (correctly) treated as part of the same reconnect and ignored.
-            // Settle past it so every cycle exercises a fresh drop.
-            try? await Task.sleep(nanoseconds: 250_000_000)
-        }
-
-        // Four straight storms never failed the call.
-        let state = await coord.state
-        XCTAssertEqual(state, .connected, "the call survives repeated drop→reconnect cycles")
+        // The bridge minted a call; abandoning it without a DELETE would leak a
+        // session until the server reaped it.
+        let deleted = await waitUntil { bridge.deleteCount == 1 }
+        XCTAssertTrue(deleted, "an aborted start still tears down the provisioned call")
     }
 
-    // MARK: - Inbound ICE burst
+    // MARK: - 2. sticky terminal states
 
-    func test_remoteIceBurstBeforeAnswer_flushedCompletelyInOrder() async throws {
-        let conn = MockConnection()
-        let channel = MockSignalingChannel()
-        let media = StubMediaEngine()
-        let coord = makeCoordinator(conn: conn, channel: channel, media: media)
-        try await arm(coord, conn: conn)
-        channel.emit(.opened)
-
-        let count = 50
-        for i in 0..<count {
-            channel.emit(.message(iceFrame("cand:burst-\(i)")))
-        }
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertTrue(media.remoteCandidates.isEmpty, "pre-answer remote ICE stays buffered")
-
-        channel.emit(.message(frame([
-            "type": "answer", "sessionId": "sig_1",
-            "data": ["type": "answer", "sdp": "v=0"],
-        ])))
-        let flushed = await waitUntil { media.remoteCandidates.count == count }
-        XCTAssertTrue(flushed, "every buffered candidate reaches the peer, none dropped")
-        XCTAssertEqual(
-            media.remoteCandidates.map(\.candidate),
-            (0..<count).map { "cand:burst-\($0)" },
-            "buffered remote ICE flushes in arrival order"
-        )
-    }
-
-    // MARK: - Mute storm
-
-    func test_concurrentMuteToggles_settleOnLastUserIntent() async throws {
+    func test_endAfterFailure_doesNotRepaintTheState() async throws {
+        let bridge = FakeBridgeApi()
+        bridge.sendOfferError = PolyError.voice(.signalingFailed("bridge sdp failed (502)"))
         let conn = MockConnection()
         let media = StubMediaEngine()
-        let coord = makeCoordinator(conn: conn, media: media)
-        try await arm(coord, conn: conn)
+        let coord = makeCoordinator(bridge: bridge, conn: conn, media: media)
 
-        // A burst of racing toggles must not crash or wedge the actor…
-        await withTaskGroup(of: Void.self) { group in
-            for i in 0..<50 {
-                group.addTask { await coord.setMuted(i % 2 == 0) }
-            }
-        }
-        // …and once the dust settles the latest intent wins deterministically.
-        await coord.setMuted(true)
-        XCTAssertEqual(media.muted, true)
-        let muted = await coord.isMuted
-        XCTAssertTrue(muted)
-    }
+        let startTask = Task { try? await coord.start() }
+        _ = await waitUntil { conn.connectCalls.count == 1 }
+        conn.simulateMessage(.sessionStart(makeEnvelope(), makeSessionStartPayload()))
+        _ = await startTask.value
 
-    // MARK: - Terminal-state stickiness
-
-    func test_endAfterFailure_keepsFailedState() async throws {
-        let conn = MockConnection()
-        let channel = MockSignalingChannel()
-        let coord = makeCoordinator(conn: conn, channel: channel)
-        try await arm(coord, conn: conn)
-        channel.emit(.opened)
-        channel.emit(.message(frame(["type": "error", "data": ["message": "boom"]])))
         let failed = await waitUntil {
             if case .failed = await coord.state { return true }
             return false
         }
         XCTAssertTrue(failed)
 
-        // A late end() (e.g. the user taps hang-up on the error screen) must
-        // not repaint the failure as a clean .ended.
         await coord.end()
         let state = await coord.state
-        XCTAssertEqual(state, .failed(.voice(.signalingFailed("boom"))))
+        guard case .failed = state else {
+            return XCTFail("a failure must not be repainted as .ended, got \(state)")
+        }
     }
 
-    func test_repeatedEnd_tearsDownOnce() async throws {
+    func test_repeatedEnd_tearsDownExactlyOnce() async throws {
+        let bridge = FakeBridgeApi()
         let conn = MockConnection()
-        let channel = MockSignalingChannel()
         let media = StubMediaEngine()
-        let coord = makeCoordinator(conn: conn, channel: channel, media: media)
-        try await arm(coord, conn: conn)
-        await connect(coord, channel: channel, media: media)
+        let coord = makeCoordinator(bridge: bridge, conn: conn, media: media)
 
+        try await connect(coord, conn: conn, media: media)
         await coord.end()
         await coord.end()
         await coord.end()
 
-        let tornDown = await waitUntil { media.closeCount >= 1 && channel.closeCalled }
-        XCTAssertTrue(tornDown)
-        try? await Task.sleep(nanoseconds: 100_000_000) // let any stray teardown tasks run
-        XCTAssertEqual(media.closeCount, 1, "repeated end() releases the engine exactly once")
-        XCTAssertEqual(channel.sentFrames(ofType: "close").count, 1,
-                       "exactly one graceful close frame goes to the gateway")
-        let state = await coord.state
-        XCTAssertEqual(state, .ended)
+        XCTAssertEqual(media.closeCount, 1, "the media engine is released once")
+        XCTAssertEqual(bridge.deleteCount, 1, "the call is deleted once")
+    }
+
+    // MARK: - 3. renegotiation storms
+
+    func test_repullStorm_neverInterleavesTwoRenegotiations() async throws {
+        let bridge = FakeBridgeApi()
+        let conn = MockConnection()
+        let channel = MockEventsChannel()
+        let media = StubMediaEngine()
+        let coord = makeCoordinator(bridge: bridge, conn: conn, channel: channel, media: media)
+
+        try await connect(coord, conn: conn, media: media)
+        channel.emit(.opened)
+        for _ in 0..<20 { channel.emit(.message(Data(#"{"event":"repull"}"#.utf8))) }
+
+        let settled = await waitUntil(timeout: 10) { bridge.pullCount == 21 }
+        XCTAssertTrue(settled, "every repull ran (got \(bridge.pullCount))")
+        // One renegotiation per pull. Interleaving would produce a different
+        // count — two answers off one pull, or a pull whose answer never lands.
+        XCTAssertEqual(bridge.renegotiatedAnswers.count, bridge.pullCount)
+        XCTAssertEqual(media.acceptedOffers.count, bridge.pullCount)
+    }
+
+    func test_repullAfterEnd_isDropped() async throws {
+        let bridge = FakeBridgeApi()
+        let conn = MockConnection()
+        let channel = MockEventsChannel()
+        let media = StubMediaEngine()
+        let coord = makeCoordinator(bridge: bridge, conn: conn, channel: channel, media: media)
+
+        try await connect(coord, conn: conn, media: media)
+        let pullsAtEnd = bridge.pullCount
+        await coord.end()
+        channel.emit(.message(Data(#"{"event":"repull"}"#.utf8)))
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(bridge.pullCount, pullsAtEnd, "a repull after teardown does nothing")
+    }
+
+    // MARK: - 4. failure paths still clean up
+
+    func test_pullFailure_failsTheCallAndReleasesResources() async throws {
+        let bridge = FakeBridgeApi()
+        bridge.pullError = PolyError.voice(.signalingFailed("bridge pull failed (502)"))
+        let conn = MockConnection()
+        let media = StubMediaEngine()
+        let coord = makeCoordinator(bridge: bridge, conn: conn, media: media)
+
+        let startTask = Task { try? await coord.start() }
+        _ = await waitUntil { conn.connectCalls.count == 1 }
+        conn.simulateMessage(.sessionStart(makeEnvelope(), makeSessionStartPayload()))
+        _ = await startTask.value
+        _ = await waitUntil { media.acceptedAnswer != nil }
+        media.driveState(.connected)
+
+        let cleanedUp = await waitUntil { media.closeCount == 1 && bridge.deleteCount == 1 }
+        XCTAssertTrue(cleanedUp, "a failed agent-track pull still releases the mic and deletes the call")
+    }
+
+    func test_rapidStartEndCycles_leaveNothingRunning() async throws {
+        for _ in 0..<5 {
+            let bridge = FakeBridgeApi()
+            let conn = MockConnection()
+            let media = StubMediaEngine()
+            let coord = makeCoordinator(bridge: bridge, conn: conn, media: media)
+
+            try await connect(coord, conn: conn, media: media)
+            await coord.end()
+
+            XCTAssertEqual(media.closeCount, 1)
+            XCTAssertEqual(bridge.deleteCount, 1)
+            let state = await coord.state
+            XCTAssertEqual(state, .ended)
+        }
     }
 }

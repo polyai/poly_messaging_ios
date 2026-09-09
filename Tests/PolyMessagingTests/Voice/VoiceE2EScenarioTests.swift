@@ -6,10 +6,10 @@ import XCTest
 /// End-to-end *scenario* coverage for voice at the layer the example apps bind
 /// to — the public `PolyCall` surface (the voice twin of the chat
 /// `E2EScenarioTests`). Each test drives a real
-/// `PolyCall → CallCoordinator → VoiceSessionLinker` pipeline over a
-/// `MockConnection` + `MockSignalingChannel` + `StubMediaEngine` (no network,
-/// no WebRTC stack) and asserts what the app observes: `states`, `state`,
-/// `isMuted`, and `audioState`.
+/// `PolyCall → BridgeCallCoordinator → VoiceSessionLinker` pipeline over a
+/// `MockConnection` + `FakeBridgeApi` + `MockEventsChannel` + `StubMediaEngine`
+/// (no network, no WebRTC stack) and asserts what the app observes: `states`,
+/// `state`, `isMuted`, and `audioState`.
 @MainActor
 final class VoiceE2EScenarioTests: XCTestCase {
 
@@ -17,7 +17,8 @@ final class VoiceE2EScenarioTests: XCTestCase {
         let call: PolyCall
         let api: MockRestApi
         let conn: MockConnection
-        let channel: MockSignalingChannel
+        let bridge: FakeBridgeApi
+        let channel: MockEventsChannel
         let media: StubMediaEngine
     }
 
@@ -32,7 +33,8 @@ final class VoiceE2EScenarioTests: XCTestCase {
     private func makeStack() -> Stack {
         let api = MockRestApi()
         let conn = MockConnection()
-        let channel = MockSignalingChannel()
+        let bridge = FakeBridgeApi()
+        let channel = MockEventsChannel()
         let media = StubMediaEngine()
         let logger = NoopLogger()
         let linker = VoiceSessionLinker(
@@ -40,42 +42,37 @@ final class VoiceE2EScenarioTests: XCTestCase {
             wsBaseURL: URL(string: "wss://messaging.test/ws")!,
             logger: logger
         )
-        let coordinator = CallCoordinator(
+        let coordinator = BridgeCallCoordinator(
             api: api,
+            bridge: bridge,
             linker: linker,
-            channel: channel,
             media: media,
-            authToken: "tok",
+            makeEventsChannel: { _ in channel },
             streamingEnabled: true,
             logger: logger,
-            disconnectGraceNanos: 300_000_000,
-            reconnectBaseNanos: 20_000_000,
-            reconnectConnectTimeoutNanos: 400_000_000
+            iceQuiet: 0.01,
+            iceCap: 0.05
         )
-        return Stack(call: PolyCall(coordinator: coordinator), api: api, conn: conn, channel: channel, media: media)
+        return Stack(call: PolyCall(coordinator: coordinator), api: api, conn: conn, bridge: bridge, channel: channel, media: media)
     }
 
-    /// `start()` the call and feed SESSION_START so the pipeline arms.
+    /// `start()` the call: feed SESSION_START so the messaging link resolves.
+    /// Returns with the call `.connecting`, as the app sees it.
     private func startCall(_ stack: Stack) async throws {
         let task = Task { try await stack.call.start() }
-        let connected = await waitUntil { stack.conn.connectCalls.count == 1 }
-        XCTAssertTrue(connected, "start() opens the messaging WS via the linker")
+        let linked = await waitUntil { stack.conn.connectCalls.count == 1 }
+        XCTAssertTrue(linked, "start() opens the messaging WS via the linker")
         stack.conn.simulateMessage(.sessionStart(makeEnvelope(), makeSessionStartPayload()))
         try await task.value
     }
 
-    /// Drive the armed pipeline to `.connected` (offer → answer → media up).
+    /// Drive the negotiated call to `.connected` (media up → agent track pulled).
     private func connect(_ stack: Stack) async {
-        stack.channel.emit(.opened)
-        _ = await waitUntil { stack.channel.sentFrames(ofType: "offer").count == 1 }
-        stack.channel.emit(.message(frame([
-            "type": "answer", "sessionId": "sig_1",
-            "data": ["type": "answer", "sdp": "v=0-answer"],
-        ])))
-        _ = await waitUntil { stack.media.acceptedAnswer == "v=0-answer" }
+        _ = await waitUntil { stack.media.acceptedAnswer != nil }
         stack.media.driveState(.connected)
         let connected = await waitUntil { await MainActor.run { stack.call.state == .connected } }
         XCTAssertTrue(connected, "the public state reaches .connected")
+        _ = await waitUntil { stack.bridge.pullCount == 1 }
     }
 
     private func frame(_ obj: [String: Any]) -> Data {
@@ -105,17 +102,41 @@ final class VoiceE2EScenarioTests: XCTestCase {
                        "the public stream publishes the exact lifecycle the UI renders")
     }
 
-    func test_signalingError_surfacesFailedState() async throws {
+    /// A rejected provision (bad or expired web calling token) is the failure an
+    /// app is most likely to hit, and it must reach the public surface as
+    /// `.failed` before any messaging session is opened.
+    func test_rejectedProvision_surfacesFailedState() async throws {
         let stack = makeStack()
-        try await startCall(stack)
-        stack.channel.emit(.opened)
-        stack.channel.emit(.message(frame(["type": "error", "data": ["message": "bad token"]])))
+        stack.bridge.provisionError = PolyError.voice(
+            .signalingFailed("Bridge provision rejected the call credentials (401)")
+        )
+
+        do {
+            try await stack.call.start()
+            XCTFail("expected start() to throw")
+        } catch {
+            // surfaced below on the public state too
+        }
 
         let failed = await waitUntil {
-            stack.call.state == .failed(.voice(.signalingFailed("bad token")))
+            stack.call.state == .failed(.voice(.signalingFailed("Bridge provision rejected the call credentials (401)")))
         }
-        XCTAssertTrue(failed, "a gateway error reaches the app as .failed")
+        XCTAssertTrue(failed, "a rejected credential reaches the app as .failed")
         XCTAssertFalse(stack.call.state.isActive)
+        XCTAssertEqual(stack.conn.connectCalls.count, 0, "no messaging session without a call")
+    }
+
+    /// Losing the control socket takes barge-in and re-pull with it, so the call
+    /// ends rather than running on blind.
+    func test_lostControlSocket_endsTheCall() async throws {
+        let stack = makeStack()
+        try await startCall(stack)
+        await connect(stack)
+
+        stack.channel.emit(.closed(code: 1006, reason: "dropped"))
+
+        let ended = await waitUntil { stack.call.state == .ended }
+        XCTAssertTrue(ended, "the app sees the call end when the bridge's control socket drops")
     }
 
     /// A late subscriber (e.g. a re-presented call screen) must immediately see

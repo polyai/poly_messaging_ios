@@ -34,7 +34,7 @@ public extension CallState {
 @MainActor
 public final class PolyCall: ObservableObject {
 
-    private let coordinator: CallCoordinator?
+    private let coordinator: BridgeCallCoordinator?
     private let config: Configuration?
 
     private let stateCaster = Multicaster<CallState>(replayLastValue: true)
@@ -69,7 +69,7 @@ public final class PolyCall: ObservableObject {
 
     /// Internal seam: drive a fully-wired pipeline (used by the test suite and
     /// the opt-in live integration probe with an injected media engine).
-    init(coordinator: CallCoordinator) {
+    init(coordinator: BridgeCallCoordinator) {
         self.config = nil
         self.coordinator = coordinator
         let states = coordinator.stateStream
@@ -151,14 +151,14 @@ public extension PolyCall {
     /// - Parameters:
     ///   - config: the shared messaging `Configuration` (connector token, environment, host).
     ///   - webrtcToken: the web calling token (the offer `authToken` + ICE-servers auth).
-    ///   - signalingHost: optional gateway-host override (required for `.custom`).
+    ///   - signalingHost: optional `webrtc-bridge` host override (required for `.custom`).
     ///   - mediaEngine: the platform WebRTC engine that produces the SDP offer and carries audio.
     /// - Throws: `PolyError.invalidConfiguration` for a `.custom` environment without a `signalingHost`.
     ///
     /// > Important: SPI, not API. This hard-codes the SDK's entire internal composition
-    /// > (`RestApi`, `VoiceSessionLinker`, `GatewaySignalingChannel`, `GatewayIceServersFetcher`,
-    /// > `CallCoordinator`) in its signature. As public API that shape could never change
-    /// > without a major bump; as SPI it stays ours to refactor.
+    /// > (`RestApi`, `VoiceSessionLinker`, `BridgeApi`, `WebSocketEventsChannel`,
+    /// > `BridgeCallCoordinator`) in its signature. As public API that shape could never
+    /// > change without a major bump; as SPI it stays ours to refactor.
     @_spi(PolyVoice)
     static func wired(
         config: Configuration,
@@ -180,19 +180,18 @@ public extension PolyCall {
             wsBaseURL: urls.wsBaseURL,
             logger: logger
         )
-        let voiceEnv = try VoiceEnvironment(environment: config.environment, signalingHost: signalingHost)
-        let channel = GatewaySignalingChannel(url: voiceEnv.signalingURL, logger: logger)
-        let iceServers = GatewayIceServersFetcher(
-            url: voiceEnv.iceServersURL(token: webrtcToken),
+        let bridgeEnv = try BridgeEnvironment(environment: config.environment, bridgeHost: signalingHost)
+        let bridge = BridgeApi(
+            baseURL: bridgeEnv.baseURL,
+            authToken: webrtcToken,
             logger: logger
         )
-        let coordinator = CallCoordinator(
+        let coordinator = BridgeCallCoordinator(
             api: api,
+            bridge: bridge,
             linker: linker,
-            channel: channel,
             media: mediaEngine,
-            iceServers: iceServers,
-            authToken: webrtcToken,
+            makeEventsChannel: { url in WebSocketEventsChannel(url: url, logger: logger) },
             streamingEnabled: config.streamingEnabled,
             logger: logger
         )

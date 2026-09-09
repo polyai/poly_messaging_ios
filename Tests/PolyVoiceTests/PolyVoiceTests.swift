@@ -1,7 +1,7 @@
 // Copyright PolyAI Limited
 
 import XCTest
-import PolyMessaging
+@_spi(PolyVoice) import PolyMessaging
 @testable import PolyVoice
 
 /// Tests for the PolyVoice product surface. The WebRTC-backed implementation is
@@ -145,6 +145,90 @@ final class CallKitAudioSeamTests: XCTestCase {
         XCTAssertFalse(RTCAudioSession.sharedInstance().useManualAudio,
                        "a non-CallKit call resets the process-global manual-audio flag")
         await engine.close()
+    }
+}
+#endif
+
+// MARK: - Bridge capabilities on the real engine (iOS-only)
+
+#if os(iOS)
+/// Exercises the four capabilities the `webrtc-bridge` path adds, against the real
+/// WebRTC engine on a simulator: the non-trickle gather wait, the gathered local
+/// description, the mic transceiver's mid, and remote-track control.
+final class WebRTCBridgeCapabilityTests: XCTestCase {
+
+    /// The heart of the non-trickle change: after the wait, the local description
+    /// must already carry candidates, because the bridge's SDP proxy has no
+    /// candidate channel to trickle them down later.
+    func test_awaitIceGathering_thenLocalDescriptionCarriesCandidates() async throws {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        defer { Task { await engine.close() } }
+
+        _ = try await engine.createOffer(iceServers: IceServer.defaultServers)
+        await engine.awaitIceGathering(quiet: 0.2, cap: 2.0)
+
+        let gathered = await engine.localDescriptionSDP()
+        let sdp = try XCTUnwrap(gathered)
+        XCTAssertTrue(sdp.contains("m=audio"))
+        XCTAssertTrue(sdp.contains("a=candidate"), "the offer POSTed to the bridge must carry its candidates")
+    }
+
+    /// The mid tells the SFU which m-line carries the published mic track.
+    func test_audioMid_identifiesTheMicrophoneTransceiver() async throws {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        defer { Task { await engine.close() } }
+
+        _ = try await engine.createOffer(iceServers: [])
+        let mid = await engine.audioMid()
+        XCTAssertEqual(mid, "0", "the single audio m-line is mid 0")
+    }
+
+    /// Barge-in can fire before a re-pull has delivered a track; that must be a
+    /// no-op rather than a crash, and the intent is applied when the track lands.
+    func test_setRemoteAudioEnabled_isSafeBeforeAnyRemoteTrack() async throws {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        defer { Task { await engine.close() } }
+
+        _ = try await engine.createOffer(iceServers: [])
+        await engine.setRemoteAudioEnabled(false)
+        await engine.setRemoteAudioEnabled(true)
+    }
+
+    /// A renegotiation offer that isn't valid SDP must surface as a media failure,
+    /// not leave the peer in a half-applied state.
+    func test_acceptRemoteOffer_rejectsInvalidSdp() async throws {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        defer { Task { await engine.close() } }
+
+        _ = try await engine.createOffer(iceServers: [])
+        do {
+            _ = try await engine.acceptRemoteOffer(sdp: "not-an-sdp")
+            XCTFail("expected the invalid renegotiation offer to throw")
+        } catch {
+            // Any error is acceptable; the point is that it does not succeed.
+        }
+    }
+
+    func test_acceptRemoteOffer_withNoPeer_throwsMediaFailed() async {
+        let engine = WebRTCCallMediaEngine(
+            audio: AudioSessionController(defaultToSpeaker: true, callKitMode: false)
+        )
+        do {
+            _ = try await engine.acceptRemoteOffer(sdp: "v=0")
+            XCTFail("expected a media failure without a peer connection")
+        } catch {
+            guard case PolyError.voice(.mediaFailed) = error else {
+                return XCTFail("expected .mediaFailed, got \(error)")
+            }
+        }
     }
 }
 #endif

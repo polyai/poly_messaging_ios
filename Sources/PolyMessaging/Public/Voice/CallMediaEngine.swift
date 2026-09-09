@@ -39,13 +39,8 @@ public protocol CallMediaEngine: Sendable {
     /// Acquire the microphone and produce the local SDP offer (audio), building
     /// the peer connection with the supplied ICE (STUN/TURN) servers.
     func createOffer(iceServers: [IceServer]) async throws -> String
-    /// Apply the remote SDP answer returned by the gateway.
+    /// Apply the remote SDP answer the bridge returns for the offer.
     func acceptAnswer(sdp: String) async throws
-    /// Add a remote ICE candidate received from the gateway.
-    func addRemoteCandidate(_ candidate: IceCandidate) async throws
-    /// Register the sink for locally-gathered ICE candidates (forwarded to the
-    /// gateway by the pipeline).
-    func setLocalCandidateHandler(_ handler: @escaping @Sendable (IceCandidate) -> Void) async
     /// Register the sink for media connection-state transitions.
     func setStateHandler(_ handler: @escaping @Sendable (CallMediaState) -> Void) async
     /// Register the sink for audio-session interruptions (phone calls, Siri, etc.).
@@ -58,6 +53,38 @@ public protocol CallMediaEngine: Sendable {
     func setMuted(_ muted: Bool) async
     /// Tear down the peer connection and release the microphone.
     func close() async
+
+    // MARK: - Non-trickle negotiation
+    //
+    // The bridge sends SDP over HTTPS with no candidate channel, and starts
+    // agent audio with a second negotiation — so unlike the retired gateway
+    // engine, these are core requirements, not optional extras.
+
+    /// Wait until ICE gathering has settled, so the offer POSTed to the bridge
+    /// already carries its candidates (the SDP proxy has no candidate channel).
+    ///
+    /// Not keyed on `iceGatheringState == .complete`: a STUN transaction that
+    /// never terminates pins that state at `.gathering` forever and suppresses
+    /// the end-of-candidates signal with it. Implementations should treat a
+    /// quiet candidate stream as settled and use `cap` only as a backstop.
+    func awaitIceGathering(quiet: TimeInterval, cap: TimeInterval) async
+
+    /// SDP of the current local description — read after ``awaitIceGathering(quiet:cap:)``
+    /// to get the offer with its candidates in it.
+    func localDescriptionSDP() async -> String?
+
+    /// The `mid` of the microphone's audio transceiver, which tells the SFU
+    /// which m-line carries the published track.
+    func audioMid() async -> String?
+
+    /// Apply a remote offer and return the answer (the bridge's agent-track
+    /// renegotiation, which happens once on connect and again on every re-pull).
+    func acceptRemoteOffer(sdp: String) async throws -> String
+
+    /// Enable or disable playback of the received agent track. Used for
+    /// barge-in: the SFU and jitter buffer already hold audio the client can't
+    /// drop, so the track is muted the instant the bridge signals barge-in.
+    func setRemoteAudioEnabled(_ enabled: Bool) async
 }
 
 // MARK: - Optional capabilities
@@ -66,10 +93,11 @@ public protocol CallMediaEngine: Sendable {
 /// adding a capability here is additive rather than a source break for existing
 /// conformers.
 ///
-/// Deliberately NOT defaulted: `createOffer`, `acceptAnswer`, `addRemoteCandidate`,
-/// `setLocalCandidateHandler`, `setStateHandler`, `setMuted` and `close`. A no-op
-/// default on any of those would turn a missing implementation into a silently
-/// broken call instead of a compile error — worse than the source break it avoids.
+/// Deliberately NOT defaulted: `createOffer`, `acceptAnswer`, `awaitIceGathering`,
+/// `localDescriptionSDP`, `acceptRemoteOffer`, `setStateHandler`, `setMuted` and
+/// `close`. A no-op default on any of those would turn a missing implementation
+/// into a silently broken call instead of a compile error — worse than the source
+/// break it avoids.
 @_spi(PolyVoice)
 public extension CallMediaEngine {
     /// Default: no interruption reporting (the call simply won't mute on a
@@ -81,4 +109,11 @@ public extension CallMediaEngine {
 
     /// Default: routing is left entirely to the system.
     func selectAudioDevice(_ device: AudioDevice?) async {}
+
+    /// Default: unknown mid — the bridge falls back to the mid it reads out of
+    /// the offer.
+    func audioMid() async -> String? { nil }
+
+    /// Default: no remote-track control (barge-in plays out its buffered tail).
+    func setRemoteAudioEnabled(_ enabled: Bool) async {}
 }

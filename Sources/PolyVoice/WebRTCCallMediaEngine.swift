@@ -7,8 +7,9 @@ import WebRTC
 
 /// Real WebRTC audio engine.
 ///
-/// Audio-only (Opus), Unified Plan, trickle ICE. Bridges WebRTC's completion-handler
-/// API into the `async` `CallMediaEngine` seam the `CallCoordinator` drives.
+/// Audio-only (Opus), Unified Plan, **non-trickle** ICE — the bridge takes a
+/// fully-gathered offer over HTTPS. Bridges WebRTC's completion-handler API into
+/// the `async` `CallMediaEngine` seam the `BridgeCallCoordinator` drives.
 final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendable {
 
     // One factory per process; RTCInitializeSSL is required once before use.
@@ -29,8 +30,18 @@ final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendabl
     // otherwise find `peer == nil`, release nothing, and leave the connection it never
     // saw running with a live mic track. Every publish point re-checks this latch.
     private var closed = false
-    private var localCandidateHandler: (@Sendable (IceCandidate) -> Void)?
     private var stateHandler: (@Sendable (CallMediaState) -> Void)?
+    // Non-trickle gather bookkeeping for the bridge path. Candidates are counted
+    // per ICE generation (keyed by the local description's ice-ufrag) so a
+    // renegotiation's wait isn't ended early by the previous generation's
+    // candidates — with BUNDLE both share one transport, so the renegotiation
+    // answer already carries them.
+    private var candidateCounts: [String: Int] = [:]
+    private var lastCandidateAt: [String: Date] = [:]
+    private var endOfCandidates: Set<String> = []
+    // Received agent track, muted/unmuted on barge-in.
+    private var remoteAudioTrack: RTCAudioTrack?
+    private var remoteAudioEnabled = true
 
     init(audio: AudioSessionController) {
         self.audio = audio
@@ -62,8 +73,9 @@ final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendabl
         let config = RTCConfiguration()
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
-        // Gateway-provided STUN/TURN (falls back to public STUN when the fetch failed);
-        // TURN entries carry credentials, STUN entries don't.
+        // Bridge-provided STUN/TURN from the provision response (falls back to
+        // Cloudflare STUN when it carries none); TURN entries carry credentials,
+        // STUN entries don't.
         config.iceServers = (iceServers.isEmpty ? IceServer.defaultServers : iceServers).map { server in
             if let username = server.username, let credential = server.credential {
                 return RTCIceServer(urlStrings: server.urls, username: username, credential: credential)
@@ -122,24 +134,6 @@ final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendabl
         }
     }
 
-    func addRemoteCandidate(_ candidate: IceCandidate) async throws {
-        guard let peer = currentPeer() else { return }
-        let rtc = RTCIceCandidate(
-            sdp: candidate.candidate,
-            sdpMLineIndex: Int32(candidate.sdpMLineIndex ?? 0),
-            sdpMid: candidate.sdpMid
-        )
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            peer.add(rtc) { error in
-                if let error { cont.resume(throwing: error) } else { cont.resume() }
-            }
-        }
-    }
-
-    func setLocalCandidateHandler(_ handler: @escaping @Sendable (IceCandidate) -> Void) async {
-        lock.lock(); localCandidateHandler = handler; lock.unlock()
-    }
-
     func setStateHandler(_ handler: @escaping @Sendable (CallMediaState) -> Void) async {
         lock.lock(); stateHandler = handler; lock.unlock()
     }
@@ -162,12 +156,101 @@ final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendabl
         track?.isEnabled = !muted
     }
 
+    // MARK: - webrtc-bridge capabilities
+
+    /// Wait for ICE gathering to settle before the offer is POSTed.
+    ///
+    /// Deliberately not `iceGatheringState == .complete`: a STUN transaction
+    /// that never terminates pins that state at `.gathering` and suppresses the
+    /// end-of-candidates event with it, so on some networks neither of WebRTC's
+    /// two "done" signals ever arrives. A quiet candidate stream is the real
+    /// signal; `cap` is only a backstop. The quiet timer arms only once a
+    /// candidate exists, so a gather producing nothing falls through to the cap
+    /// rather than returning an empty SDP immediately.
+    func awaitIceGathering(quiet: TimeInterval, cap: TimeInterval) async {
+        let deadline = Date().addingTimeInterval(cap)
+        let step: UInt64 = 25_000_000 // 25ms
+        while Date() < deadline {
+            let key = currentIceUfrag() ?? ""
+            lock.lock()
+            let done = endOfCandidates.contains(key)
+            let count = candidateCounts[key] ?? 0
+            let last = lastCandidateAt[key]
+            lock.unlock()
+            if done { return }
+            if currentPeer()?.iceGatheringState == .complete { return }
+            if count > 0, let last, Date().timeIntervalSince(last) >= quiet { return }
+            try? await Task.sleep(nanoseconds: step)
+        }
+    }
+
+    func localDescriptionSDP() async -> String? {
+        currentPeer()?.localDescription?.sdp
+    }
+
+    /// The mid of the transceiver carrying the microphone track.
+    func audioMid() async -> String? {
+        guard let peer = currentPeer() else { return nil }
+        lock.lock(); let track = audioTrack; lock.unlock()
+        guard let track else { return nil }
+        return peer.transceivers.first { $0.sender.track?.trackId == track.trackId }?.mid
+    }
+
+    /// Apply the bridge's renegotiation offer (which adds the agent's recvonly
+    /// m-line) and return the answer.
+    func acceptRemoteOffer(sdp: String) async throws -> String {
+        guard let peer = currentPeer() else {
+            throw PolyError.voice(.mediaFailed("no active peer connection"))
+        }
+        let offer = RTCSessionDescription(type: .offer, sdp: sdp)
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            peer.setRemoteDescription(offer) { error in
+                if let error { cont.resume(throwing: error) } else { cont.resume() }
+            }
+        }
+        let empty = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
+        let answer = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<RTCSessionDescription, Error>) in
+            peer.answer(for: empty) { sdp, error in
+                if let sdp { cont.resume(returning: sdp) }
+                else { cont.resume(throwing: error ?? PolyError.voice(.mediaFailed("answer creation failed"))) }
+            }
+        }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            peer.setLocalDescription(answer) { error in
+                if let error { cont.resume(throwing: error) } else { cont.resume() }
+            }
+        }
+        return answer.sdp
+    }
+
+    /// Barge-in: the SFU and jitter buffer already hold agent audio this client
+    /// cannot drop, so the received track is muted the moment the bridge says so.
+    func setRemoteAudioEnabled(_ enabled: Bool) async {
+        lock.lock()
+        remoteAudioEnabled = enabled
+        let track = remoteAudioTrack
+        lock.unlock()
+        track?.isEnabled = enabled
+    }
+
+    private func currentIceUfrag() -> String? {
+        guard let sdp = currentPeer()?.localDescription?.sdp else { return nil }
+        for line in sdp.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("a=ice-ufrag:") {
+                return String(trimmed.dropFirst("a=ice-ufrag:".count))
+            }
+        }
+        return nil
+    }
+
     func close() async {
         lock.lock()
         closed = true // latch first: a createOffer() still in flight will release its own peer
         let peer = self.peer
         self.peer = nil
         self.audioTrack = nil
+        self.remoteAudioTrack = nil
         lock.unlock()
         peer?.close()
         if audio.callKitMode {
@@ -200,13 +283,19 @@ final class WebRTCCallMediaEngine: NSObject, CallMediaEngine, @unchecked Sendabl
 
 extension WebRTCCallMediaEngine: RTCPeerConnectionDelegate {
 
+    /// Candidates are never trickled — the bridge's SDP proxy has no channel for
+    /// them. They are only counted here, so `awaitIceGathering` can tell when the
+    /// stream has gone quiet and the local description is complete enough to send.
     func peerConnection(_ pc: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
-        lock.lock(); let handler = localCandidateHandler; lock.unlock()
-        handler?(IceCandidate(
-            candidate: candidate.sdp,
-            sdpMid: candidate.sdpMid,
-            sdpMLineIndex: Int(candidate.sdpMLineIndex)
-        ))
+        let key = candidate.sdp.ufragValue ?? currentIceUfrag() ?? ""
+        lock.lock()
+        if candidate.sdp.isEmpty {
+            endOfCandidates.insert(key)
+        } else {
+            candidateCounts[key, default: 0] += 1
+            lastCandidateAt[key] = Date()
+        }
+        lock.unlock()
     }
 
     func peerConnection(_ pc: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
@@ -221,6 +310,18 @@ extension WebRTCCallMediaEngine: RTCPeerConnectionDelegate {
         }
     }
 
+    /// The agent track arrives on the renegotiation, not the first answer.
+    /// Capture it so barge-in can mute it, and honour a mute that fired before
+    /// the (re-)pull delivered this track.
+    func peerConnection(_ pc: RTCPeerConnection, didStartReceivingOn transceiver: RTCRtpTransceiver) {
+        guard let track = transceiver.receiver.track as? RTCAudioTrack else { return }
+        lock.lock()
+        remoteAudioTrack = track
+        let enabled = remoteAudioEnabled
+        lock.unlock()
+        track.isEnabled = enabled
+    }
+
     // Unused delegate requirements.
     func peerConnection(_ pc: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
     func peerConnection(_ pc: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
@@ -230,5 +331,18 @@ extension WebRTCCallMediaEngine: RTCPeerConnectionDelegate {
     func peerConnection(_ pc: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
     func peerConnection(_ pc: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     func peerConnection(_ pc: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
+}
+
+/// Extract `ufrag` from a candidate's SDP attribute line, which is what keys the
+/// gather bookkeeping to an ICE generation. A candidate from a retired
+/// generation can still be delivered after a renegotiation installs the new
+/// local description, so the local description alone is not a safe key.
+private extension String {
+    var ufragValue: String? {
+        guard let range = self.range(of: "ufrag ") else { return nil }
+        let rest = self[range.upperBound...]
+        let value = rest.prefix { !$0.isWhitespace }
+        return value.isEmpty ? nil : String(value)
+    }
 }
 #endif
