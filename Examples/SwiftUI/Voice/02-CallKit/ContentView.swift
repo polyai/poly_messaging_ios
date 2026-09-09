@@ -57,7 +57,7 @@ struct ContentView: View {
         if call.state.isActive {
             if callKitAvailable { callKit.requestEnd() } else { Task { await call.end() } }
         } else {
-            self.call = nil // back to the start screen for a fresh call
+            startCall()
         }
     }
 
