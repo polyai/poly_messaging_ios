@@ -22,6 +22,10 @@ final class PolyVoiceTests: XCTestCase {
         XCTAssertFalse(options.callKit, "CallKit integration is strictly opt-in")
     }
 
+    func test_voiceOptions_webrtcToken_defaultsToNil() {
+        XCTAssertNil(VoiceOptions().webrtcToken, "nil falls back to Configuration.webrtcToken at call(...) time")
+    }
+
     #if os(iOS)
     func test_call_emptyApiKey_throws() {
         XCTAssertThrowsError(try PolyVoice.call(
@@ -39,6 +43,38 @@ final class PolyVoiceTests: XCTestCase {
             config: Configuration(apiKey: "k"),
             options: VoiceOptions(webrtcToken: "")
         ))
+    }
+
+    func test_call_noWebrtcTokenAnywhere_throws() {
+        // Neither VoiceOptions nor Configuration carries one.
+        XCTAssertThrowsError(try PolyVoice.call(config: Configuration(apiKey: "k"))) { error in
+            guard case PolyError.invalidConfiguration = error else {
+                return XCTFail("expected invalidConfiguration, got \(error)")
+            }
+        }
+    }
+
+    func test_call_webrtcToken_fallsBackToConfiguration() throws {
+        // VoiceOptions omits it entirely — Configuration.webrtcToken alone must be enough.
+        let config = Configuration(apiKey: "k", webrtcToken: "t")
+        let call = try PolyVoice.call(config: config)
+        XCTAssertEqual(call.state, .idle)
+    }
+
+    func test_call_optionsWebrtcToken_winsOverConfiguration() throws {
+        // Both set — VoiceOptions.webrtcToken (not Configuration's) is the one that must be used.
+        // Construction succeeding with a garbage Configuration token proves the options one won.
+        let config = Configuration(apiKey: "k", webrtcToken: "")
+        let call = try PolyVoice.call(config: config, options: VoiceOptions(webrtcToken: "t"))
+        XCTAssertEqual(call.state, .idle)
+    }
+
+    func test_zeroArgCall_readsPolyMessagingInitialize() throws {
+        // The PolyMessaging.chat()/voice() pattern: call() alone, no config, reading
+        // whatever PolyMessaging.initialize(_:) last stored (process-global, like those two).
+        PolyMessaging.initialize(Configuration(apiKey: "k", webrtcToken: "t"))
+        let call = try PolyVoice.call()
+        XCTAssertEqual(call.state, .idle)
     }
 
     func test_call_customEnvironmentWithoutSignalingHost_throws() {

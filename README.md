@@ -284,10 +284,13 @@ CocoaPods chat-only install pulls nothing extra). It reuses the messaging `Confi
 import PolyMessaging
 import PolyVoice
 
-let call = try PolyVoice.call(
-    config: Configuration(apiKey: "YOUR_CONNECTOR_TOKEN"),        // connector token
-    options: VoiceOptions(webrtcToken: "YOUR_WEB_CALLING_TOKEN")  // web calling token — distinct; both from Agent Studio
-)
+PolyMessaging.initialize(.init(
+    apiKey: "YOUR_CONNECTOR_TOKEN",       // connector token
+    webrtcToken: "YOUR_WEB_CALLING_TOKEN" // web calling token — distinct; both from Agent Studio
+))
+
+// Elsewhere — no config to pass, PolyVoice.call() reads what initialize(...) set:
+let call = try PolyVoice.call()
 Task { for await state in call.states { render(state) } }   // .connecting → .connected → …
 try await call.start()   // after the microphone permission (NSMicrophoneUsageDescription) is granted
 ```
@@ -299,7 +302,11 @@ for what moved underneath.
 A call needs **two credentials, both required and distinct**, from
 [Agent Studio](https://studio.poly.ai) › **Connector Settings** (the same connector you use for chat):
 the **connector token** (`Configuration.apiKey`, authenticates the connector) and the **web calling token**
-(`VoiceOptions.webrtcToken`, authenticates the media backend).
+(`Configuration.webrtcToken` — or `VoiceOptions.webrtcToken`, which wins if both are set —
+authenticates the media backend). Setting `webrtcToken` once on `Configuration` means the same
+value you pass to `PolyMessaging.initialize(...)` for chat also covers every `PolyVoice.call()`.
+Pass a `Configuration` explicitly — `PolyVoice.call(config:options:)` — for a call that needs a
+different connector than the one `initialize(...)` set.
 
 Add **`PolyVoice`** via SPM (`.product(name: "PolyVoice", package: "ios-sdk")`) or CocoaPods
 (`pod 'PolyVoice'`). **📖 Full guide → [`docs/PolyVoice.md`](docs/PolyVoice.md)** — credentials, the
@@ -1475,6 +1482,7 @@ PolyMessaging.initialize(.init(
 | `heartbeatIntervalSeconds` | `nil` (30 s) | Override the heartbeat interval; server caps may overrule |
 | `sessionTimeoutSeconds` | `nil` (600) | Override the idle-timeout (matches the backend's WebSocket idle timeout of 10 min) |
 | `maxReconnectAttempts` | `nil` (10) | Override the reconnect cap |
+| `webrtcToken` | `nil` | The web calling token for [`PolyVoice`](#voice-calling-polyvoice) — set it here once instead of repeating it at every `PolyVoice.call(...)` site. Ignored by chat; `nil` if this app doesn't place calls |
 
 **Environments:**
 
@@ -1505,7 +1513,8 @@ PolyMessaging.initialize(.init(
     logLevel: .error,                        // .none | .error | .warn | .info | .debug
     heartbeatIntervalSeconds: 30,            // server caps may overrule
     sessionTimeoutSeconds: 600,              // idle timeout before the session expires (matches backend ~10 min)
-    maxReconnectAttempts: 10                 // reconnect budget before .failed
+    maxReconnectAttempts: 10,                // reconnect budget before .failed
+    webrtcToken: nil                         // set if this app also calls PolyVoice — see below
 ))
 ```
 

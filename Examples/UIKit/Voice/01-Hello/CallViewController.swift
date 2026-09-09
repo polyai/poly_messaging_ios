@@ -73,14 +73,10 @@ final class CallViewController: UIViewController {
     }
 
     private func startCall() {
-        // Fill in your connector from Agent Studio › Connector Settings.
-        let config = Configuration(apiKey: "YOUR_CONNECTOR_TOKEN")
         let newCall: PolyCall
         do {
-            newCall = try PolyVoice.call(
-                config: config,
-                options: VoiceOptions(webrtcToken: "YOUR_WEB_CALLING_TOKEN")
-            )
+            // No config/options to pass — PolyVoice.call() reads what AppDelegate set.
+            newCall = try PolyVoice.call()
         } catch {
             state = .failed(error as? PolyError ?? .voice(.signalingFailed("\(error)")))
             return

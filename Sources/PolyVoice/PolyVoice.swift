@@ -14,13 +14,17 @@ import WebRTC
 /// `Configuration` and the same `CallState` / `PolyError` vocabulary.
 ///
 /// ```swift
-/// let call = try PolyVoice.call(
-///     config: Configuration(apiKey: "…"),
-///     options: VoiceOptions(webrtcToken: "…")
-/// )
+/// // At launch — sets both tokens once (webrtcToken is only needed for voice):
+/// PolyMessaging.initialize(.init(apiKey: "…", webrtcToken: "…"))
+///
+/// // Elsewhere — no config to pass, same pattern as PolyMessaging.chat():
+/// let call = try PolyVoice.call()
 /// for await state in call.states { /* .connecting → .connected → … */ }
 /// try await call.start()   // after the microphone permission is granted
 /// ```
+///
+/// Need a different connector than the one `initialize(_:)` set? Pass a `Configuration`
+/// explicitly instead: `call(config:options:)`.
 public enum PolyVoice {
 
     #if os(iOS)
@@ -28,20 +32,27 @@ public enum PolyVoice {
     /// it — observe `PolyCall.states` and call `PolyCall.start()`.
     ///
     /// - Parameters:
-    ///   - config: the shared messaging `Configuration` (connector token, environment, host).
-    ///   - options: voice options — `VoiceOptions.webrtcToken` is required.
-    /// - Throws: `PolyError.invalidConfiguration` if `apiKey`/`webrtcToken` is empty, or the
-    ///   environment is `.custom` without `VoiceOptions.signalingHost`.
+    ///   - config: the shared messaging `Configuration` (connector token, environment, host —
+    ///     and optionally `webrtcToken`, see below).
+    ///   - options: voice options. A web calling token is required, from either
+    ///     `options.webrtcToken` or, when that's `nil`, `config.webrtcToken` — the former wins
+    ///     when both are set. Defaults to `VoiceOptions()`, so `call(config:)` alone works when
+    ///     `config.webrtcToken` is already set.
+    /// - Throws: `PolyError.invalidConfiguration` if `apiKey` is empty, if neither
+    ///   `options.webrtcToken` nor `config.webrtcToken` is set, or the environment is `.custom`
+    ///   without `VoiceOptions.signalingHost`.
     /// > Note: `@MainActor`, matching ``PolyMessaging/voice()`` and
     /// > ``PolyMessaging/chat()`` — ``PolyCall`` is an `ObservableObject`, so it
     /// > is created and observed on the main actor like `ChatSession`.
     @MainActor
-    public static func call(config: Configuration, options: VoiceOptions) throws -> PolyCall {
+    public static func call(config: Configuration, options: VoiceOptions = VoiceOptions()) throws -> PolyCall {
         guard !config.apiKey.isEmpty else {
             throw PolyError.invalidConfiguration("Configuration.apiKey must not be empty")
         }
-        guard !options.webrtcToken.isEmpty else {
-            throw PolyError.invalidConfiguration("VoiceOptions.webrtcToken must not be empty")
+        guard let webrtcToken = options.webrtcToken ?? config.webrtcToken, !webrtcToken.isEmpty else {
+            throw PolyError.invalidConfiguration(
+                "A web calling token is required — set VoiceOptions.webrtcToken or Configuration.webrtcToken"
+            )
         }
         let audio = AudioSessionController(
             defaultToSpeaker: options.speakerphone,
@@ -50,10 +61,20 @@ public enum PolyVoice {
         let engine = WebRTCCallMediaEngine(audio: audio)
         return try PolyCall.wired(
             config: config,
-            webrtcToken: options.webrtcToken,
+            webrtcToken: webrtcToken,
             signalingHost: options.signalingHost,
             mediaEngine: engine
         )
+    }
+
+    /// Same as ``call(config:options:)``, but reads the `Configuration` from
+    /// `PolyMessaging.initialize(_:)` instead of taking one — the ``PolyMessaging/chat()``
+    /// / ``PolyMessaging/voice()`` pattern. Requires `initialize(_:)` to have been called
+    /// first (crashes otherwise, same contract as those two); requires `Configuration.webrtcToken`
+    /// to have been set there too, unless `options.webrtcToken` supplies one.
+    @MainActor
+    public static func call(options: VoiceOptions = VoiceOptions()) throws -> PolyCall {
+        try call(config: PolyMessaging.currentConfig, options: options)
     }
 
     // MARK: - CallKit audio-session hooks (pair with `VoiceOptions.callKit`)

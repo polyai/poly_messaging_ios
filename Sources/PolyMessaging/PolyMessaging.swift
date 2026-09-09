@@ -17,7 +17,11 @@ public enum PolyMessaging {
         configLock.unlock()
     }
 
-    static var currentConfig: Configuration {
+    /// SPI seam so `PolyVoice.call(options:)` can default to the `Configuration` set by
+    /// `initialize(_:)` — the same crash-early contract as `chat()` / `voice()`: calling
+    /// before `initialize(_:)` is a programmer error, not a recoverable one.
+    @_spi(PolyVoice)
+    public static var currentConfig: Configuration {
         configLock.lock()
         let config = _config
         configLock.unlock()

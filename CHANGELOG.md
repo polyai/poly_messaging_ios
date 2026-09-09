@@ -4,6 +4,16 @@ All notable changes to the PolyMessaging iOS SDK are documented here.
 This project adheres to [Semantic Versioning](https://semver.org). While the SDK
 is pre-1.0, breaking changes bump the **minor** version.
 
+## [Unreleased]
+
+### Added
+- **`Configuration.webrtcToken`** — set the web calling token once, alongside `apiKey`, instead of
+  repeating it at every `PolyVoice.call(...)` site. `VoiceOptions.webrtcToken` is now optional
+  (`nil` default) and falls back to `Configuration.webrtcToken` when unset; `VoiceOptions.webrtcToken`
+  still wins when both are set. `PolyVoice.call(config:options:)`'s `options` parameter now defaults
+  to `VoiceOptions()`, so `PolyVoice.call(config:)` alone works once `config.webrtcToken` is set.
+  Existing `VoiceOptions(webrtcToken: "…")` initializer call sites remain valid.
+
 ## [0.10.0] - 2026-09-09
 
 ### Changed

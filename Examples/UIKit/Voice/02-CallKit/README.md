@@ -5,7 +5,7 @@
 ## Run it
 
 1. Open `VoiceCallKitUIKit.xcodeproj` (or `xcodegen generate` first if you changed `project.yml`).
-2. Drop your **connector token** and **web calling token** into the `PolyVoice.call(...)` block in `CallViewController.swift` (both from Agent Studio › Connector Settings — see the [voice guide › Credentials](../../../../docs/PolyVoice.md#credentials)).
+2. Drop your **connector token** and **web calling token** into `PolyMessaging.initialize(...)` in `AppDelegate.swift` (both from Agent Studio › Connector Settings — see the [voice guide › Credentials](../../../../docs/PolyVoice.md#credentials)).
 3. Everything the app needs is preconfigured in `project.yml`: the mic permission (`NSMicrophoneUsageDescription` — allow it on first call) and `UIBackgroundModes: [audio, voip]`. Note that **`voip` is required** — without it CallKit refuses every transaction (`requesttransaction Code=1`) and the Start button appears dead.
 4. Run on a **physical device**. WebRTC media can't cross the simulator, and CallKit itself is broken there (iOS 17+ simulators auto-end the call; `didActivate` never fires) — on the simulator this example deliberately falls back to a plain `01-Hello`-style call.
 

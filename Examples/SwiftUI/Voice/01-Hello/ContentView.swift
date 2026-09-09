@@ -17,7 +17,7 @@ struct ContentView: View {
             if let call {
                 // `PolyCall` is an ObservableObject, so the panel re-renders itself
                 // on every state / audio-route change — no `for await` plumbing.
-                CallPanel(call: call, onEnd: { self.call = nil })
+                CallPanel(call: call, onRestart: startCall)
             } else {
                 Text(setupFailure.map { "Failed: \($0)" } ?? "Tap to call the agent")
                     .foregroundStyle(setupFailure == nil ? Color.secondary : Color.red)
@@ -32,13 +32,9 @@ struct ContentView: View {
     }
 
     private func startCall() {
-        // Fill in your connector from Agent Studio › Connector Settings.
-        let config = Configuration(apiKey: "YOUR_CONNECTOR_TOKEN")
         do {
-            let newCall = try PolyVoice.call(
-                config: config,
-                options: VoiceOptions(webrtcToken: "YOUR_WEB_CALLING_TOKEN")
-            )
+            // No config/options to pass — PolyVoice.call() reads what VoiceApp.swift set.
+            let newCall = try PolyVoice.call()
             setupFailure = nil
             call = newCall
             Task { try? await newCall.start() }
@@ -52,7 +48,7 @@ struct ContentView: View {
 /// and `audioState` are `@Published`, so this view stays in sync on its own.
 private struct CallPanel: View {
     @ObservedObject var call: PolyCall
-    let onEnd: () -> Void
+    let onRestart: () -> Void
 
     @State private var muted = false
 
@@ -123,7 +119,7 @@ private struct CallPanel: View {
         if call.state.isActive {
             Task { await call.end() }
         } else {
-            onEnd() // drop this call so the start screen can build a fresh one
+            onRestart()
         }
     }
 

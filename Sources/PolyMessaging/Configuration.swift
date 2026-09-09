@@ -20,6 +20,11 @@ public struct Configuration: Sendable {
     /// Override the default max-reconnect attempts (10). Server `SessionCapabilities`
     /// still overrides this once the session is established.
     public let maxReconnectAttempts: Int?
+    /// The connector's web calling token (PolyVoice) — set it here, once, alongside
+    /// `apiKey`, so it doesn't need repeating at every `PolyVoice.call(...)` site.
+    /// `VoiceOptions.webrtcToken` still wins when both are set. Chat-only apps
+    /// leave this `nil`; `PolyMessaging` itself never reads it.
+    public let webrtcToken: String?
     public init(
         apiKey: String,
         environment: Environment = .us,
@@ -28,7 +33,8 @@ public struct Configuration: Sendable {
         logLevel: LogLevel = .error,
         heartbeatIntervalSeconds: Int? = nil,
         sessionTimeoutSeconds: Int? = nil,
-        maxReconnectAttempts: Int? = nil
+        maxReconnectAttempts: Int? = nil,
+        webrtcToken: String? = nil
     ) {
         self.apiKey = apiKey
         self.environment = environment
@@ -38,6 +44,7 @@ public struct Configuration: Sendable {
         self.heartbeatIntervalSeconds = heartbeatIntervalSeconds
         self.sessionTimeoutSeconds = sessionTimeoutSeconds
         self.maxReconnectAttempts = maxReconnectAttempts
+        self.webrtcToken = webrtcToken
     }
 }
 
