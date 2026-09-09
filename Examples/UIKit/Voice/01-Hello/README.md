@@ -78,7 +78,7 @@ observer = Task { [weak self] in
 
 **Under the hood:** `states` replays the current state to late subscribers, so subscribing right after `PolyVoice.call(...)` can't miss a transition. A failed call lands on `.failed(PolyError)` — the same error vocabulary as chat.
 
-*See [voice guide › Quickstart](../../../../docs/PolyVoice.md#quickstart).*
+*See [voice guide › Quick start](../../../../docs/PolyVoice.md#quick-start).*
 
 ### Start and end — `CallViewController.swift`
 
