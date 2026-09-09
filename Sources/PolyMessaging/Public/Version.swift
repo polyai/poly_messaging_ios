@@ -6,5 +6,5 @@ public extension PolyMessaging {
     /// Single source of truth: the `User-Agent` header (`RestApi`) and the
     /// example connect-screen footers read this. Bump it by hand when cutting a
     /// release (mirror the version in `CHANGELOG.md`, then tag `vX.Y.Z`).
-    static let version = "0.10.0"
+    static let version = "0.11.0"
 }

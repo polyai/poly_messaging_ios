@@ -4,7 +4,7 @@ All notable changes to the PolyMessaging iOS SDK are documented here.
 This project adheres to [Semantic Versioning](https://semver.org). While the SDK
 is pre-1.0, breaking changes bump the **minor** version.
 
-## [Unreleased]
+## [0.11.0] - 2026-09-09
 
 ### Added
 - **`Configuration.webrtcToken`** — set the web calling token once, alongside `apiKey`, instead of
