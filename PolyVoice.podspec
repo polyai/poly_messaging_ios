@@ -1,7 +1,7 @@
 Pod::Spec.new do |s|
   s.name             = 'PolyVoice'
   # Keep in sync with Sources/PolyMessaging/Public/Version.swift and CHANGELOG.md.
-  s.version          = '0.9.0'
+  s.version          = '0.10.0'
   s.summary          = 'WebRTC voice calling for the PolyAI iOS SDK.'
   s.description      = <<-DESC
     PolyVoice adds live, two-way WebRTC voice calls to a PolyAI agent — the
